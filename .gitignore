@@ -1,0 +1,13 @@
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# macOS
+.DS_Store
+
+# Vendored binaries (large; fetched via scripts/fetch-vendor.sh)
+Vendor/yt-dlp/yt-dlp_macos
+Vendor/ffmpeg/ffmpeg
