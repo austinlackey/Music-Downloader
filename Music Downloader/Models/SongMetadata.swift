@@ -10,6 +10,8 @@ nonisolated struct SongMetadata: Codable, Sendable, Hashable {
     var coverArtURL: URL?
     var geniusID: Int?
     var geniusURL: URL?
+    var genre: String?
+    var comments: String?
 
     /// Convenience factory for SwiftUI previews / settings placeholders.
     static let sample = SongMetadata(
@@ -19,6 +21,8 @@ nonisolated struct SongMetadata: Codable, Sendable, Hashable {
         year: "2005",
         coverArtURL: nil,
         geniusID: nil,
-        geniusURL: nil
+        geniusURL: nil,
+        genre: "Entertainment",
+        comments: "First YouTube video ever"
     )
 }
