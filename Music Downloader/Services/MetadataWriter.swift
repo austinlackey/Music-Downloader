@@ -45,6 +45,12 @@ actor MetadataWriter {
         if let year = metadata.year, !year.isEmpty {
             args += ["-metadata", "date=\(year)"]
         }
+        if let genre = metadata.genre, !genre.isEmpty {
+            args += ["-metadata", "genre=\(genre)"]
+        }
+        if let comments = metadata.comments, !comments.isEmpty {
+            args += ["-metadata", "comment=\(comments)"]
+        }
         if tempCover != nil {
             args += [
                 "-metadata:s:v", "title=Album cover",
