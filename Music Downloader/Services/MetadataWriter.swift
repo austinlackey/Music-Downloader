@@ -37,20 +37,47 @@ actor MetadataWriter {
             args += ["-map", "0:a"]
         }
         args += ["-c", "copy", "-id3v2_version", "3", "-write_id3v2", "1"]
+
+        // --- Standard ID3 tags ---
         args += ["-metadata", "title=\(metadata.title)"]
         args += ["-metadata", "artist=\(metadata.artist)"]
         if let album = metadata.album, !album.isEmpty {
             args += ["-metadata", "album=\(album)"]
         }
-        if let year = metadata.year, !year.isEmpty {
-            args += ["-metadata", "date=\(year)"]
+        // Full release date, fall back to year
+        let dateValue = metadata.releaseDate ?? metadata.year
+        if let dateValue, !dateValue.isEmpty {
+            args += ["-metadata", "date=\(dateValue)"]
         }
         if let genre = metadata.genre, !genre.isEmpty {
             args += ["-metadata", "genre=\(genre)"]
         }
-        if let comments = metadata.comments, !comments.isEmpty {
-            args += ["-metadata", "comment=\(comments)"]
+        // album_artist = primary artist
+        args += ["-metadata", "album_artist=\(metadata.artist)"]
+        // composer = writers
+        if let writers = metadata.writerArtists, !writers.isEmpty {
+            args += ["-metadata", "composer=\(writers.joined(separator: "; "))"]
         }
+        // language
+        if let language = metadata.language, !language.isEmpty {
+            args += ["-metadata", "language=\(language)"]
+        }
+
+        // --- TXXX custom frames ---
+        Self.addTXXX(&args, key: "FEATURED_ARTISTS", jsonArray: metadata.featuredArtists)
+        Self.addTXXX(&args, key: "PRODUCERS", jsonArray: metadata.producerArtists)
+        Self.addTXXX(&args, key: "WRITERS", jsonArray: metadata.writerArtists)
+        Self.addTXXXEncodable(&args, key: "CREDITS", value: metadata.credits)
+        Self.addTXXX(&args, key: "RECORDING_LOCATION", string: metadata.recordingLocation)
+        Self.addTXXXEncodable(&args, key: "MEDIA_LINKS", value: metadata.mediaLinks)
+        Self.addTXXXEncodable(&args, key: "RELATIONSHIPS", value: metadata.songRelationships)
+        if let geniusURL = metadata.geniusURL {
+            Self.addTXXX(&args, key: "GENIUS_URL", string: geniusURL.absoluteString)
+        }
+        Self.addTXXX(&args, key: "DESCRIPTION", string: metadata.songDescription)
+        Self.addTXXXEncodable(&args, key: "ANNOTATIONS", value: metadata.annotations)
+        Self.addTXXX(&args, key: "USER_NOTES", string: metadata.comments)
+
         if tempCover != nil {
             args += [
                 "-metadata:s:v", "title=Album cover",
@@ -80,6 +107,28 @@ actor MetadataWriter {
 
         // Atomic swap: replaceItemAt preserves resource forks + moves to Trash on failure.
         _ = try FileManager.default.replaceItemAt(fileURL, withItemAt: tempOut)
+    }
+
+    /// Append a TXXX metadata arg with a plain string value.
+    private static func addTXXX(_ args: inout [String], key: String, string: String?) {
+        guard let string, !string.isEmpty else { return }
+        args += ["-metadata", "\(key)=\(string)"]
+    }
+
+    /// Append a TXXX metadata arg with a JSON-encoded array of strings.
+    private static func addTXXX(_ args: inout [String], key: String, jsonArray: [String]?) {
+        guard let array = jsonArray, !array.isEmpty else { return }
+        guard let data = try? JSONEncoder().encode(array),
+              let json = String(data: data, encoding: .utf8) else { return }
+        args += ["-metadata", "\(key)=\(json)"]
+    }
+
+    /// Append a TXXX metadata arg with a JSON-encoded Encodable array.
+    private static func addTXXXEncodable<T: Encodable>(_ args: inout [String], key: String, value: [T]?) {
+        guard let value, !value.isEmpty else { return }
+        guard let data = try? JSONEncoder().encode(value),
+              let json = String(data: data, encoding: .utf8) else { return }
+        args += ["-metadata", "\(key)=\(json)"]
     }
 }
 
