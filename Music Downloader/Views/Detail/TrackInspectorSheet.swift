@@ -68,6 +68,10 @@ struct TrackInspectorSheet: View {
 
                 if !isEditing {
                     VStack(alignment: .leading, spacing: 16) {
+                        creditsSection
+                        songFactsSection
+                        relationshipsSection
+                        mediaLinksSection
                         alternativesSection
                         researchSection
                     }
@@ -92,48 +96,65 @@ struct TrackInspectorSheet: View {
     // MARK: - File info row
 
     private var fileInfoRow: some View {
-        HStack(spacing: 16) {
-            if let url = track.fileURL {
-                HStack(spacing: 4) {
-                    Text("File:")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(url.lastPathComponent)
-                        .font(.caption)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-
-                if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-                   let size = attrs[.size] as? UInt64 {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 16) {
+                if let url = track.fileURL {
                     HStack(spacing: 4) {
-                        Text("Size:")
+                        Text("File:")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Text(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))
+                        Text(url.lastPathComponent)
+                            .font(.caption)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+
+                    if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                       let size = attrs[.size] as? UInt64 {
+                        HStack(spacing: 4) {
+                            Text("Size:")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))
+                                .font(.caption)
+                        }
+                    }
+
+                    HStack(spacing: 4) {
+                        Text("Format:")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(url.pathExtension.uppercased())
                             .font(.caption)
                     }
                 }
 
-                HStack(spacing: 4) {
-                    Text("Format:")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(url.pathExtension.uppercased())
+                Spacer()
+
+                Button {
+                    store.revealTrackInFinder(track)
+                } label: {
+                    Label("Reveal", systemImage: "magnifyingglass")
                         .font(.caption)
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
 
-            Spacer()
-
-            Button {
-                store.revealTrackInFinder(track)
-            } label: {
-                Label("Reveal", systemImage: "magnifyingglass")
-                    .font(.caption)
+            if let original = track.originalFilename,
+               original != track.fileURL?.deletingPathExtension().lastPathComponent {
+                HStack(spacing: 4) {
+                    Text("Original:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(original)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         }
     }
 
@@ -179,6 +200,24 @@ struct TrackInspectorSheet: View {
             infoRow(label: "Album", value: metadata?.album ?? "—")
             infoRow(label: "Year", value: metadata?.year ?? "—")
             infoRow(label: "Genre", value: metadata?.genre ?? "—")
+            if let featured = metadata?.featuredArtists, !featured.isEmpty {
+                infoRow(label: "Featured", value: featured.joined(separator: ", "))
+            }
+            if let producers = metadata?.producerArtists, !producers.isEmpty {
+                infoRow(label: "Producers", value: producers.joined(separator: ", "))
+            }
+            if let writers = metadata?.writerArtists, !writers.isEmpty {
+                infoRow(label: "Writers", value: writers.joined(separator: ", "))
+            }
+            if let language = metadata?.language, !language.isEmpty {
+                infoRow(label: "Language", value: language)
+            }
+            if let location = metadata?.recordingLocation, !location.isEmpty {
+                infoRow(label: "Recorded", value: location)
+            }
+            if let releaseDate = metadata?.releaseDate, !releaseDate.isEmpty {
+                infoRow(label: "Released", value: releaseDate)
+            }
             if let comments = metadata?.comments, !comments.isEmpty {
                 infoRow(label: "Comments", value: comments)
             }
@@ -253,6 +292,204 @@ struct TrackInspectorSheet: View {
         editArtworkData = nil
         artworkChanged = false
         isEditing = true
+    }
+
+    // MARK: - Song Facts (view mode only)
+
+    @ViewBuilder
+    private var songFactsSection: some View {
+        let desc = track.metadata?.songDescription
+        let annotations = track.metadata?.annotations ?? []
+        let hasFacts = (desc != nil && !desc!.isEmpty) || !annotations.isEmpty
+
+        if hasFacts {
+            VStack(alignment: .leading, spacing: 10) {
+                sectionLabel("Song Facts")
+
+                if let desc, !desc.isEmpty {
+                    DisclosureGroup("About This Song") {
+                        Text(desc)
+                            .font(.caption)
+                            .textSelection(.enabled)
+                            .padding(.top, 4)
+                    }
+                    .font(.caption.weight(.medium))
+                }
+
+                let verified = annotations.filter(\.verified)
+                let accepted = annotations.filter { !$0.verified }
+
+                if !verified.isEmpty {
+                    DisclosureGroup("Artist Annotations (\(verified.count))") {
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(Array(verified.enumerated()), id: \.offset) { _, fact in
+                                annotationFactView(fact)
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+                    .font(.caption.weight(.medium))
+                }
+
+                if !accepted.isEmpty {
+                    DisclosureGroup("Top Annotations (\(accepted.count))") {
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(Array(accepted.enumerated()), id: \.offset) { _, fact in
+                                annotationFactView(fact)
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+                    .font(.caption.weight(.medium))
+                }
+            }
+        }
+    }
+
+    private func annotationFactView(_ fact: AnnotationFact) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("\"\(fact.fragment.prefix(120))\"")
+                .font(.caption)
+                .italic()
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+
+            Text(fact.body)
+                .font(.caption)
+                .textSelection(.enabled)
+
+            HStack(spacing: 6) {
+                Text(fact.authors)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if fact.verified {
+                    Label("Verified", systemImage: "checkmark.seal.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.blue)
+                } else {
+                    Text("\(fact.votes) votes")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Divider()
+        }
+    }
+
+    // MARK: - Credits (view mode only)
+
+    @ViewBuilder
+    private var creditsSection: some View {
+        if let credits = track.metadata?.credits, !credits.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                sectionLabel("Credits")
+
+                DisclosureGroup("Performance Credits (\(credits.count))") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(credits.enumerated()), id: \.offset) { _, credit in
+                            HStack(alignment: .top, spacing: 6) {
+                                Text(credit.role + ":")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(minWidth: 80, alignment: .trailing)
+                                Text(credit.artists.joined(separator: ", "))
+                                    .font(.caption)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+                .font(.caption.weight(.medium))
+            }
+        }
+    }
+
+    // MARK: - Song Relationships (view mode only)
+
+    @ViewBuilder
+    private var relationshipsSection: some View {
+        if let relationships = track.metadata?.songRelationships, !relationships.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                sectionLabel("Song Relationships")
+
+                ForEach(Array(relationships.enumerated()), id: \.offset) { _, rel in
+                    HStack(alignment: .top, spacing: 6) {
+                        Text(Self.formatRelationshipType(rel.type) + ":")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(minWidth: 80, alignment: .trailing)
+                        Text("\"\(rel.title)\" by \(rel.artist)")
+                            .font(.caption)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Convert snake_case relationship types to readable labels.
+    private static func formatRelationshipType(_ type: String) -> String {
+        switch type {
+        case "samples":         "Samples"
+        case "sampled_in":      "Sampled in"
+        case "interpolates":    "Interpolates"
+        case "interpolated_by": "Interpolated by"
+        case "cover_of":        "Cover of"
+        case "covered_by":      "Covered by"
+        case "remix_of":        "Remix of"
+        case "remixed_by":      "Remixed by"
+        case "live_version_of": "Live version of"
+        case "performed_live_as": "Performed live as"
+        default:                type.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
+    // MARK: - Media Links (view mode only)
+
+    @ViewBuilder
+    private var mediaLinksSection: some View {
+        if let links = track.metadata?.mediaLinks, !links.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                sectionLabel("Listen On")
+
+                FlowLayout(spacing: 8) {
+                    ForEach(Array(links.enumerated()), id: \.offset) { _, link in
+                        Link(destination: link.url) {
+                            HStack(spacing: 4) {
+                                Image(systemName: Self.iconForProvider(link.provider))
+                                Text(Self.displayNameForProvider(link.provider))
+                            }
+                            .font(.caption)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.secondary.opacity(0.1), in: Capsule())
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static func iconForProvider(_ provider: String) -> String {
+        switch provider.lowercased() {
+        case "spotify":      "arrow.up.right.square"
+        case "apple_music":  "arrow.up.right.square"
+        case "youtube":      "play.rectangle"
+        case "soundcloud":   "arrow.up.right.square"
+        default:             "link"
+        }
+    }
+
+    private static func displayNameForProvider(_ provider: String) -> String {
+        switch provider.lowercased() {
+        case "spotify":      "Spotify"
+        case "apple_music":  "Apple Music"
+        case "youtube":      "YouTube"
+        case "soundcloud":   "SoundCloud"
+        default:             provider.replacingOccurrences(of: "_", with: " ").capitalized
+        }
     }
 
     // MARK: - Alternatives (view mode only)
@@ -371,7 +608,18 @@ struct TrackInspectorSheet: View {
             genre: editGenre.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? nil : editGenre.trimmingCharacters(in: .whitespacesAndNewlines),
             comments: editComments.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? nil : editComments.trimmingCharacters(in: .whitespacesAndNewlines)
+                ? nil : editComments.trimmingCharacters(in: .whitespacesAndNewlines),
+            songDescription: track.metadata?.songDescription,
+            annotations: track.metadata?.annotations,
+            featuredArtists: track.metadata?.featuredArtists,
+            producerArtists: track.metadata?.producerArtists,
+            writerArtists: track.metadata?.writerArtists,
+            credits: track.metadata?.credits,
+            recordingLocation: track.metadata?.recordingLocation,
+            language: track.metadata?.language,
+            releaseDate: track.metadata?.releaseDate,
+            mediaLinks: track.metadata?.mediaLinks,
+            songRelationships: track.metadata?.songRelationships
         )
 
         let artwork = artworkChanged ? editArtworkData : nil
@@ -438,7 +686,7 @@ struct TrackInspectorSheet: View {
 
         do {
             let service = GeniusService()
-            let hits = try await service.search(query: query, token: token)
+            let hits = try await service.search(query: query, token: token, stripNoise: false)
             track.alternativeMatches = Array(hits.prefix(5))
             selectedHitID = hits.first?.id
         } catch {
@@ -489,5 +737,49 @@ private struct HitRow: View {
         }
         .buttonStyle(.plain)
         .background(isSelected ? Color.accentColor.opacity(0.1) : Color.clear)
+    }
+}
+
+// MARK: - Flow layout for media link pills
+
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let result = layout(in: proposal.width ?? 0, subviews: subviews)
+        return result.size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let result = layout(in: bounds.width, subviews: subviews)
+        for (index, origin) in result.origins.enumerated() {
+            subviews[index].place(
+                at: CGPoint(x: bounds.minX + origin.x, y: bounds.minY + origin.y),
+                proposal: .unspecified
+            )
+        }
+    }
+
+    private func layout(in width: CGFloat, subviews: Subviews) -> (size: CGSize, origins: [CGPoint]) {
+        var origins: [CGPoint] = []
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var maxWidth: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x + size.width > width, x > 0 {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            origins.append(CGPoint(x: x, y: y))
+            rowHeight = max(rowHeight, size.height)
+            x += size.width + spacing
+            maxWidth = max(maxWidth, x - spacing)
+        }
+
+        return (CGSize(width: maxWidth, height: y + rowHeight), origins)
     }
 }
