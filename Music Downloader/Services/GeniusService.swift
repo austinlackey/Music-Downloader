@@ -15,9 +15,9 @@ actor GeniusService {
 
     /// Up to ~10 search hits for a freeform query. The query is pre-cleaned
     /// to strip common yt-dlp title noise ("Official Video", "[HD]", etc.).
-    func search(query: String, token: String) async throws -> [GeniusHitResult] {
+    func search(query: String, token: String, stripNoise: Bool = true) async throws -> [GeniusHitResult] {
         try requireToken(token)
-        let cleaned = Self.cleanQuery(query)
+        let cleaned = stripNoise ? Self.cleanQuery(query) : query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return [] }
 
         var comps = URLComponents(
@@ -57,6 +57,30 @@ actor GeniusService {
         return decoded.response.song
     }
 
+    /// Fetch referents (annotations) for a song.
+    func fetchReferents(songID: Int, token: String) async throws -> [GeniusReferent] {
+        try requireToken(token)
+        var comps = URLComponents(
+            url: base.appendingPathComponent("referents"),
+            resolvingAgainstBaseURL: false
+        )!
+        comps.queryItems = [
+            URLQueryItem(name: "song_id", value: String(songID)),
+            URLQueryItem(name: "text_format", value: "plain"),
+            URLQueryItem(name: "per_page", value: "50"),
+        ]
+
+        var req = URLRequest(url: comps.url!)
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.timeoutInterval = 20
+
+        let (data, resp) = try await session.data(for: req)
+        try Self.validate(resp, data: data)
+
+        let decoded = try JSONDecoder().decode(GeniusReferentsResponse.self, from: data)
+        return decoded.response.referents
+    }
+
     /// Download cover art image bytes. No auth required for the CDN.
     func fetchCoverArt(url: URL) async throws -> Data {
         var req = URLRequest(url: url)
@@ -82,9 +106,39 @@ actor GeniusService {
         return (metadata, Array(hits.prefix(5)))
     }
 
-    /// Build full `SongMetadata` for a specific hit by calling `/songs/:id`.
+    /// Build full `SongMetadata` for a specific hit by calling `/songs/:id`
+    /// and fetching annotations in parallel.
     func metadataFor(hit: GeniusHitResult, token: String) async throws -> SongMetadata {
         let detail = try await songDetail(id: hit.id, token: token)
+
+        // Fetch referents in parallel (non-fatal).
+        let facts = await fetchFactsQuietly(songID: hit.id, detail: detail, token: token)
+
+        // Map custom performances to CreditEntry
+        let creditEntries: [CreditEntry]? = detail.customPerformances?.isEmpty == false
+            ? detail.customPerformances!.map { perf in
+                CreditEntry(role: perf.label, artists: perf.artists.map(\.name))
+            }
+            : nil
+
+        // Map media to MediaLink (skip malformed URLs)
+        let mediaLinkEntries: [MediaLink]? = detail.media?.compactMap { m in
+            guard let url = URL(string: m.url) else { return nil }
+            return MediaLink(provider: m.provider, url: url)
+        }.nilIfEmpty
+
+        // Map song relationships to flat entries
+        let relationshipEntries: [SongRelationshipEntry]? = detail.songRelationships?
+            .flatMap { rel in
+                rel.songs.map { song in
+                    SongRelationshipEntry(
+                        type: rel.relationshipType,
+                        title: song.title,
+                        artist: song.primaryArtist.name
+                    )
+                }
+            }.nilIfEmpty
+
         return SongMetadata(
             title: detail.title,
             artist: detail.primaryArtist.name,
@@ -92,8 +146,56 @@ actor GeniusService {
             year: Self.extractYear(from: detail.releaseDate),
             coverArtURL: detail.album?.coverArtURL ?? detail.songArtImageURL ?? hit.songArtImageURL,
             geniusID: detail.id,
-            geniusURL: detail.url ?? hit.url
+            geniusURL: detail.url ?? hit.url,
+            songDescription: facts.description,
+            annotations: facts.annotations.isEmpty ? nil : facts.annotations,
+            featuredArtists: detail.featuredArtists?.map(\.name).nilIfEmpty,
+            producerArtists: detail.producerArtists?.map(\.name).nilIfEmpty,
+            writerArtists: detail.writerArtists?.map(\.name).nilIfEmpty,
+            credits: creditEntries,
+            recordingLocation: detail.recordingLocation,
+            language: detail.language,
+            releaseDate: detail.releaseDate,
+            mediaLinks: mediaLinkEntries,
+            songRelationships: relationshipEntries
         )
+    }
+
+    /// Fetch and process song facts. Never throws — returns empty on failure.
+    private func fetchFactsQuietly(
+        songID: Int,
+        detail: GeniusSongDetail,
+        token: String
+    ) async -> (description: String?, annotations: [AnnotationFact]) {
+        let desc = detail.description?.plain
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var annotationFacts: [AnnotationFact] = []
+        do {
+            let referents = try await fetchReferents(songID: songID, token: token)
+            let filtered = referents.filter { $0.classification == "verified" || $0.classification == "accepted" }
+            let mapped: [AnnotationFact] = filtered.flatMap { ref in
+                ref.annotations.map { ann in
+                    AnnotationFact(
+                        fragment: ref.fragment,
+                        body: ann.body.plain.trimmingCharacters(in: .whitespacesAndNewlines),
+                        authors: ann.authors.map(\.user.name).joined(separator: ", "),
+                        verified: ann.verified,
+                        votes: ann.votesTotal
+                    )
+                }
+            }
+            // Verified first (by votes desc), then accepted (by votes desc). Cap at 20.
+            annotationFacts = mapped.sorted { lhs, rhs in
+                if lhs.verified != rhs.verified { return lhs.verified }
+                return lhs.votes > rhs.votes
+            }.prefix(20).map { $0 }
+        } catch {
+            // Non-fatal — metadata still gets basic fields.
+        }
+
+        let cleanDesc = (desc?.isEmpty ?? true) ? nil : desc
+        return (cleanDesc, annotationFacts)
     }
 
     // MARK: - Helpers
@@ -120,27 +222,13 @@ actor GeniusService {
         return String(date.prefix(4))
     }
 
-    /// Strip common yt-dlp/YouTube title suffixes so Genius search matches better.
+    /// Strip parenthesised/bracketed text and common yt-dlp noise so Genius
+    /// search matches better.  e.g. "Song (feat. X) [Official Video]" → "Song"
     nonisolated static func cleanQuery(_ raw: String) -> String {
         var s = raw
-        let patterns: [String] = [
-            #"\s*\(.*?official.*?\)"#, #"\s*\[.*?official.*?\]"#,
-            #"\s*\(.*?lyrics?.*?\)"#,  #"\s*\[.*?lyrics?.*?\]"#,
-            #"\s*\(.*?audio.*?\)"#,    #"\s*\[.*?audio.*?\]"#,
-            #"\s*\(.*?music video.*?\)"#, #"\s*\[.*?music video.*?\]"#,
-            #"\s*\(.*?lyric video.*?\)"#, #"\s*\[.*?lyric video.*?\]"#,
-            #"\s*\(.*?visualizer.*?\)"#, #"\s*\[.*?visualizer.*?\]"#,
-            #"\s*\(.*?hd.*?\)"#,       #"\s*\[.*?hd.*?\]"#,
-            #"\s*\(.*?4k.*?\)"#,       #"\s*\[.*?4k.*?\]"#,
-            #"\s*\(.*?remaster(ed)?.*?\)"#, #"\s*\[.*?remaster(ed)?.*?\]"#,
-        ]
-        for p in patterns {
-            s = s.replacingOccurrences(
-                of: p,
-                with: "",
-                options: [.regularExpression, .caseInsensitive]
-            )
-        }
+        // Remove everything inside parentheses and brackets (greedy per pair).
+        s = s.replacingOccurrences(of: #"\s*\([^)]*\)"#, with: "", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\s*\[[^\]]*\]"#, with: "", options: .regularExpression)
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
@@ -162,5 +250,12 @@ nonisolated enum GeniusError: LocalizedError {
         case .httpStatus(let c):  "Genius returned HTTP \(c)."
         case .noMatch:            "No Genius match found."
         }
+    }
+}
+
+extension Array {
+    /// Returns nil if the array is empty, otherwise returns self.
+    nonisolated var nilIfEmpty: [Element]? {
+        isEmpty ? nil : self
     }
 }
