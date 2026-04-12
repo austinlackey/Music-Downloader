@@ -414,17 +414,23 @@ struct TrackInspectorSheet: View {
             VStack(alignment: .leading, spacing: 10) {
                 sectionLabel("Song Relationships")
 
-                ForEach(Array(relationships.enumerated()), id: \.offset) { _, rel in
-                    HStack(alignment: .top, spacing: 6) {
-                        Text(Self.formatRelationshipType(rel.type) + ":")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(minWidth: 80, alignment: .trailing)
-                        Text("\"\(rel.title)\" by \(rel.artist)")
-                            .font(.caption)
-                            .textSelection(.enabled)
+                DisclosureGroup("Connections (\(relationships.count))") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(relationships.enumerated()), id: \.offset) { _, rel in
+                            HStack(alignment: .top, spacing: 6) {
+                                Text(Self.formatRelationshipType(rel.type) + ":")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(minWidth: 80, alignment: .trailing)
+                                Text("\"\(rel.title)\" by \(rel.artist)")
+                                    .font(.caption)
+                                    .textSelection(.enabled)
+                            }
+                        }
                     }
+                    .padding(.top, 4)
                 }
+                .font(.caption.weight(.medium))
             }
         }
     }
