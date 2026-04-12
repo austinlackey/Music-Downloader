@@ -48,4 +48,9 @@ final class DownloadJob: Identifiable {
     var isActive: Bool {
         status == .fetchingMetadata || status == .downloading || status == .pending
     }
+
+    /// True when the download folder has been deleted or moved externally.
+    var isFolderMissing: Bool {
+        !FileManager.default.fileExists(atPath: folderURL.path)
+    }
 }

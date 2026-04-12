@@ -42,4 +42,15 @@ enum JobStatus: String, Codable, Hashable, Sendable {
         case .cancelled:        .secondary
         }
     }
+
+    var sortOrder: Int {
+        switch self {
+        case .downloading:      0
+        case .fetchingMetadata: 1
+        case .pending:          2
+        case .completed:        3
+        case .failed:           4
+        case .cancelled:        5
+        }
+    }
 }

@@ -76,6 +76,7 @@ final class DownloadStore {
         }
         let token = settings.geniusToken
         let template = settings.renameTemplate
+        let stripNoise = settings.stripSearchNoise
 
         Task { [weak self] in
             guard let self else { return }
@@ -93,7 +94,8 @@ final class DownloadStore {
                             track: track,
                             in: job,
                             token: token,
-                            template: template
+                            template: template,
+                            stripNoise: stripNoise
                         )
                     }
                 }
@@ -174,6 +176,33 @@ final class DownloadStore {
 
             self.persist()
         }
+    }
+
+    /// Revert all tracks in a job to their original yt-dlp filenames and clear
+    /// all Genius metadata so the job can be re-enriched from scratch.
+    func clearAllMetadata(job: DownloadJob) {
+        for track in job.tracks where track.fileURL != nil {
+            // Revert filename if it was renamed.
+            if let current = track.fileURL,
+               let original = track.originalFilename,
+               current.deletingPathExtension().lastPathComponent != original {
+                let ext = current.pathExtension
+                let dest = current.deletingLastPathComponent()
+                    .appendingPathComponent(original)
+                    .appendingPathExtension(ext)
+                do {
+                    let safeDest = Self.uniqueDestination(for: dest, current: current)
+                    try FileManager.default.moveItem(at: current, to: safeDest)
+                    track.fileURL = safeDest
+                } catch {
+                    // Non-fatal — continue clearing metadata for the rest.
+                }
+            }
+            track.metadata = nil
+            track.enrichmentStatus = .notStarted
+            track.alternativeMatches = []
+        }
+        persist()
     }
 
     /// Rename a track back to its original yt-dlp filename. Tags stay written;
@@ -300,13 +329,14 @@ final class DownloadStore {
         track: Track,
         in job: DownloadJob,
         token: String,
-        template: String
+        template: String,
+        stripNoise: Bool = true
     ) async {
         guard track.fileURL != nil else { return }
         track.enrichmentStatus = .searching
 
         do {
-            let hits = try await genius.search(query: track.title, token: token)
+            let hits = try await genius.search(query: track.title, token: token, stripNoise: stripNoise)
             guard let top = hits.first else { throw GeniusError.noMatch }
             track.alternativeMatches = Array(hits.prefix(5))
             await applyHit(top, to: track, in: job, token: token, template: template)
@@ -322,10 +352,10 @@ final class DownloadStore {
         token: String,
         template: String
     ) async {
-        guard let currentURL = track.fileURL else { return }
+        guard track.fileURL != nil else { return }
         // Capture original filename on first enrichment for revert.
         if track.originalFilename == nil {
-            track.originalFilename = currentURL.deletingPathExtension().lastPathComponent
+            track.originalFilename = track.fileURL!.deletingPathExtension().lastPathComponent
         }
 
         track.enrichmentStatus = .matched
@@ -338,6 +368,10 @@ final class DownloadStore {
             if let coverURL = metadata.coverArtURL {
                 coverData = try? await genius.fetchCoverArt(url: coverURL)
             }
+
+            // Re-read fileURL after awaits — another task may have renamed
+            // the file while we were fetching metadata / cover art.
+            guard let currentURL = track.fileURL else { return }
 
             track.enrichmentStatus = .writing
             try await writer.write(

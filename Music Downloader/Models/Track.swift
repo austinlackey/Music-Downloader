@@ -23,6 +23,12 @@ final class Track: Identifiable {
     /// inspector sheet so the user can pick a different match.
     var alternativeMatches: [GeniusHitResult] = []
 
+    /// True when a file was expected but no longer exists on disk.
+    var isFileMissing: Bool {
+        guard let url = fileURL else { return false }
+        return !FileManager.default.fileExists(atPath: url.path)
+    }
+
     init(id: String, title: String) {
         self.id = id
         self.title = title

@@ -1,5 +1,7 @@
+import AppKit
 import AVFoundation
 import Foundation
+import MediaPlayer
 import Observation
 
 /// Single-track audio playback wrapper around `AVAudioPlayer`.
@@ -27,6 +29,10 @@ final class PlaybackController {
     private var player: AVAudioPlayer?
     private var timer: Timer?
 
+    init() {
+        setupRemoteCommandCenter()
+    }
+
     // MARK: - Commands
 
     /// Start (or resume) playback for `track`. If `track` is already loaded,
@@ -41,6 +47,7 @@ final class PlaybackController {
         if currentTrack?.id == track.id, let player = self.player {
             player.play()
             isPlaying = true
+            updatePlaybackState()
             startTimer()
             return
         }
@@ -59,6 +66,8 @@ final class PlaybackController {
             self.isPlaying = true
             self.errorMessage = nil
             startTimer()
+            updateNowPlayingInfo()
+            updatePlaybackState()
         } catch {
             self.errorMessage = "Couldn't play file: \(error.localizedDescription)"
             self.currentTrack = nil
@@ -72,6 +81,7 @@ final class PlaybackController {
         player?.pause()
         isPlaying = false
         stopTimer()
+        updatePlaybackState()
     }
 
     /// If `track` is currently loaded and playing, pauses; otherwise plays it.
@@ -86,6 +96,7 @@ final class PlaybackController {
     /// Stop and unload the current track. Clears the player bar.
     func stop() {
         stopInternal()
+        clearNowPlayingInfo()
         currentTrack = nil
         currentTime = 0
         duration = 0
@@ -97,6 +108,7 @@ final class PlaybackController {
         let clamped = max(0, min(time, duration))
         player.currentTime = clamped
         currentTime = clamped
+        updateNowPlayingElapsedTime()
     }
 
     // MARK: - Queries used by views
@@ -146,6 +158,102 @@ final class PlaybackController {
             isPlaying = false
             currentTime = duration
             stopTimer()
+            clearNowPlayingInfo()
         }
+    }
+
+    // MARK: - Now Playing / Remote Commands
+
+    private func setupRemoteCommandCenter() {
+        let commandCenter = MPRemoteCommandCenter.shared()
+
+        commandCenter.playCommand.addTarget { [weak self] _ in
+            Task { @MainActor in
+                guard let self, let track = self.currentTrack, !self.isPlaying else { return }
+                self.play(track)
+            }
+            return .success
+        }
+
+        commandCenter.pauseCommand.addTarget { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.isPlaying else { return }
+                self.pause()
+            }
+            return .success
+        }
+
+        commandCenter.togglePlayPauseCommand.addTarget { [weak self] _ in
+            Task { @MainActor in
+                guard let self, let track = self.currentTrack else { return }
+                self.toggle(track)
+            }
+            return .success
+        }
+
+        commandCenter.changePlaybackPositionCommand.addTarget { [weak self] event in
+            guard let positionEvent = event as? MPChangePlaybackPositionCommandEvent else {
+                return .commandFailed
+            }
+            Task { @MainActor in
+                self?.seek(to: positionEvent.positionTime)
+            }
+            return .success
+        }
+
+        // No playlist-level skip in this app.
+        commandCenter.nextTrackCommand.isEnabled = false
+        commandCenter.previousTrackCommand.isEnabled = false
+    }
+
+    private func updateNowPlayingInfo() {
+        guard let track = currentTrack else { return }
+        let meta = track.metadata
+
+        var info: [String: Any] = [
+            MPMediaItemPropertyTitle: meta?.title ?? track.title,
+            MPMediaItemPropertyPlaybackDuration: duration,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
+        ]
+        if let artist = meta?.artist {
+            info[MPMediaItemPropertyArtist] = artist
+        }
+        if let album = meta?.album {
+            info[MPMediaItemPropertyAlbumTitle] = album
+        }
+
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+
+        // Load artwork asynchronously from cover art URL.
+        if let coverURL = meta?.coverArtURL {
+            Task.detached {
+                guard let (data, _) = try? await URLSession.shared.data(from: coverURL),
+                      let image = NSImage(data: data) else { return }
+                let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+                await MainActor.run {
+                    guard var current = MPNowPlayingInfoCenter.default().nowPlayingInfo else { return }
+                    current[MPMediaItemPropertyArtwork] = artwork
+                    MPNowPlayingInfoCenter.default().nowPlayingInfo = current
+                }
+            }
+        }
+    }
+
+    private func updateNowPlayingElapsedTime() {
+        guard var info = MPNowPlayingInfoCenter.default().nowPlayingInfo else { return }
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentTime
+        info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    private func updatePlaybackState() {
+        MPNowPlayingInfoCenter.default().playbackState = isPlaying ? .playing : .paused
+        updateNowPlayingElapsedTime()
+    }
+
+    private func clearNowPlayingInfo() {
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        MPNowPlayingInfoCenter.default().playbackState = .stopped
     }
 }

@@ -59,6 +59,11 @@ fi
 
 mkdir -p "$BUILD_DIR"
 
+# ─── Update version in Xcode project ───────────────────────────────────────
+echo "📝 Updating MARKETING_VERSION in project.pbxproj to ${VERSION}..."
+sed -i '' "s/MARKETING_VERSION = .*;/MARKETING_VERSION = ${VERSION};/g" \
+  "$SCRIPT_DIR/Music Downloader.xcodeproj/project.pbxproj"
+
 # ─── Step 1: Archive ────────────────────────────────────────────────────────
 echo "🔨 Archiving ${APP_NAME} v${VERSION}..."
 xcodebuild -project "$SCRIPT_DIR/Music Downloader.xcodeproj" \
@@ -106,13 +111,29 @@ LENGTH=$(echo "$SIGN_OUTPUT" | grep -o 'length="[^"]*"' | cut -d'"' -f2)
 echo "   Signature: $ED_SIGNATURE"
 echo "   Length: $LENGTH"
 
-# ─── Step 5: Upload to GitHub Releases ──────────────────────────────────────
+# ─── Step 5: Create DMG installer ──────────────────────────────────────────
+DMG_NAME="Music-Downloader-${VERSION}.dmg"
+echo "💿 Creating DMG installer..."
+create-dmg \
+  --volname "Music Downloader" \
+  --background "$SCRIPT_DIR/dmg-bg.png" \
+  --window-pos 200 120 \
+  --window-size 600 400 \
+  --icon-size 100 \
+  --icon "Music Downloader.app" 150 190 \
+  --app-drop-link 450 190 \
+  "$BUILD_DIR/$DMG_NAME" \
+  "$APP_PATH"
+
+echo "✅ DMG created"
+
+# ─── Step 6: Upload to GitHub Releases ──────────────────────────────────────
 echo "🚀 Creating GitHub release v${VERSION}..."
-gh release create "v${VERSION}" "$BUILD_DIR/$ZIP_NAME" \
+gh release create "v${VERSION}" "$BUILD_DIR/$ZIP_NAME" "$BUILD_DIR/$DMG_NAME" \
   --title "v${VERSION}" \
   --notes "$NOTES"
 
-# ─── Step 6: Update appcast.xml ─────────────────────────────────────────────
+# ─── Step 7: Update appcast.xml ─────────────────────────────────────────────
 echo "📝 Updating appcast.xml..."
 PUB_DATE=$(date -u "+%a, %d %b %Y %H:%M:%S +0000")
 BUILD_NUMBER=$(echo "$VERSION" | awk -F. '{print $1*10000 + $2*100 + $3}')
@@ -148,10 +169,10 @@ EOF
 sed -i '' "/<language>en<\/language>/r $ITEM_FILE" "$APPCAST"
 rm "$ITEM_FILE"
 
-# ─── Step 7: Commit and push ────────────────────────────────────────────────
+# ─── Step 8: Commit and push ────────────────────────────────────────────────
 echo "📤 Pushing appcast update..."
 echo "- Bug fixes and improvements" > "$RELEASE_NOTES"
-git add "$APPCAST" "$RELEASE_NOTES"
+git add "$APPCAST" "$RELEASE_NOTES" "$SCRIPT_DIR/Music Downloader.xcodeproj/project.pbxproj"
 git commit -m "Release v${VERSION}"
 git push
 

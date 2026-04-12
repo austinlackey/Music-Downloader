@@ -195,18 +195,20 @@ struct WaveformView: View {
             for bucket in 0..<bucketCount {
                 let start = bucket * framesPerBucket
                 let end = min(start + framesPerBucket, total)
-                var maxAmp: Float = 0
+                var sumSquares: Float = 0
+                let count = end - start
                 for i in start..<end {
-                    let val = abs(channelData[i])
-                    if val > maxAmp { maxAmp = val }
+                    let val = channelData[i]
+                    sumSquares += val * val
                 }
-                result.append(maxAmp)
+                let rms = sqrtf(sumSquares / Float(max(count, 1)))
+                result.append(rms)
             }
 
-            // Normalize to [0, 1]
+            // Normalize to [0, 1] and apply sqrt curve for visual contrast
             let peak = result.max() ?? 1
             if peak > 0 {
-                result = result.map { $0 / peak }
+                result = result.map { sqrtf($0 / peak) }
             }
 
             await MainActor.run {

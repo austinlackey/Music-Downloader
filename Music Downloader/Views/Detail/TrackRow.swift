@@ -6,48 +6,72 @@ struct TrackRow: View {
     let index: Int
 
     var body: some View {
-        HStack(spacing: 12) {
-            Text("\(index)")
-                .font(.system(.body, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 28, alignment: .trailing)
+        HStack(spacing: 0) {
+            // # column
+            HStack(spacing: 8) {
+                Text("\(index)")
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, alignment: .trailing)
 
-            // Status icon: prefer enrichment state once download is complete.
-            Image(systemName: leadingSymbolName)
-                .foregroundStyle(leadingTint)
-                .symbolEffect(.pulse, options: .repeating, isActive: isInFlight)
-                .frame(width: 18)
-
-            VStack(alignment: .leading, spacing: 4) {
-                // Primary line: enriched "Artist — Title", else fall back to title.
-                if let metadata = track.metadata, track.enrichmentStatus == .enriched {
-                    HStack(spacing: 6) {
-                        Text(metadata.artist)
-                            .fontWeight(.medium)
-                        Text("—")
-                            .foregroundStyle(.secondary)
-                        Text(metadata.title)
-                    }
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                } else {
-                    Text(track.title)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-
-                // Secondary line: either progress bar, album name, or status.
-                secondaryLine
+                Image(systemName: leadingSymbolName)
+                    .foregroundStyle(leadingTint)
+                    .symbolEffect(.pulse, options: .repeating, isActive: isInFlight)
+                    .frame(width: 16)
             }
+            .frame(width: 60, alignment: .leading)
 
-            Spacer()
+            // Title column (flexible)
+            HStack(spacing: 8) {
+                artworkThumbnail
 
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(track.metadata?.title ?? track.title)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+
+                    // Show progress / error inline under title
+                    inlineSecondary
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.trailing, 8)
+
+            // Artist column
+            Text(track.metadata?.artist ?? "—")
+                .font(.subheadline)
+                .foregroundStyle(track.metadata?.artist != nil ? .primary : .secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: 140, alignment: .leading)
+                .padding(.trailing, 8)
+
+            // Album column
+            VStack(alignment: .leading, spacing: 0) {
+                Text(track.metadata?.album ?? "—")
+                    .font(.subheadline)
+                    .foregroundStyle(track.metadata?.album != nil ? .primary : .secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let year = track.metadata?.year {
+                    Text(year)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 140, alignment: .leading)
+            .padding(.trailing, 8)
+
+            // Status column
             statusLabel
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
+                .frame(width: 70, alignment: .leading)
 
+            // Play button
             playButton
+                .frame(width: 28)
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
@@ -60,8 +84,33 @@ struct TrackRow: View {
     }
 
     @ViewBuilder
+    private var artworkThumbnail: some View {
+        if let url = track.metadata?.coverArtURL, track.enrichmentStatus == .enriched {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case .success(let img):
+                    img.resizable().scaledToFill()
+                default:
+                    Color.secondary.opacity(0.15)
+                }
+            }
+            .frame(width: 32, height: 32)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+        } else {
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color.secondary.opacity(0.1))
+                .frame(width: 32, height: 32)
+                .overlay {
+                    Image(systemName: "music.note")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary.opacity(0.5))
+                }
+        }
+    }
+
+    @ViewBuilder
     private var playButton: some View {
-        if track.fileURL != nil, track.status == .completed {
+        if track.fileURL != nil, track.status == .completed, !track.isFileMissing {
             Button {
                 playback.toggle(track)
             } label: {
@@ -80,8 +129,13 @@ struct TrackRow: View {
     }
 
     @ViewBuilder
-    private var secondaryLine: some View {
-        if track.status == .downloading {
+    private var inlineSecondary: some View {
+        if track.isFileMissing {
+            Text("File missing from disk")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .lineLimit(1)
+        } else if track.status == .downloading {
             ProgressView(value: track.progress)
                 .progressViewStyle(.linear)
                 .controlSize(.mini)
@@ -101,42 +155,44 @@ struct TrackRow: View {
                 .foregroundStyle(.red)
                 .lineLimit(1)
                 .truncationMode(.middle)
-        } else if let album = track.metadata?.album, track.enrichmentStatus == .enriched {
-            Text(album + (track.metadata?.year.map { " • \($0)" } ?? ""))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
         }
     }
 
     @ViewBuilder
     private var statusLabel: some View {
-        switch track.status {
-        case .downloading:
-            Text("\(Int(track.progress * 100))%")
-        case .completed:
-            switch track.enrichmentStatus {
-            case .enriched:              Text("Tagged")
-            case .failed:                Text("Error")
-            case .searching, .writing, .matched: Text("Working…")
-            default:                     Text("Done")
+        if track.isFileMissing {
+            Text("Missing")
+                .foregroundStyle(.orange)
+        } else {
+            switch track.status {
+            case .downloading:
+                Text("\(Int(track.progress * 100))%")
+            case .completed:
+                switch track.enrichmentStatus {
+                case .enriched:              Text("Tagged")
+                case .failed:                Text("Error")
+                case .searching, .writing, .matched: Text("Working…")
+                default:                     Text("Done")
+                }
+            case .failed:
+                Text("Failed")
+            case .cancelled:
+                Text("Cancelled")
+            case .pending, .fetchingMetadata:
+                Text("Queued")
             }
-        case .failed:
-            Text("Failed")
-        case .cancelled:
-            Text("Cancelled")
-        case .pending, .fetchingMetadata:
-            Text("Queued")
         }
     }
 
     private var leadingSymbolName: String {
+        if track.isFileMissing { return "questionmark.folder" }
         // Still downloading → show download status. Done → show enrichment status.
         if track.status != .completed { return track.status.symbolName }
         return track.enrichmentStatus.symbolName
     }
 
     private var leadingTint: Color {
+        if track.isFileMissing { return .orange }
         if track.status != .completed { return track.status.tint }
         return track.enrichmentStatus.tint
     }

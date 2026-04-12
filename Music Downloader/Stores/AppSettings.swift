@@ -9,6 +9,7 @@ final class AppSettings {
     private static let audioFormatKey     = "audioFormat"
     private static let geniusTokenKey     = "geniusToken"
     private static let renameTemplateKey  = "renameTemplate"
+    private static let stripSearchNoiseKey = "stripSearchNoise"
 
     var downloadRoot: URL {
         didSet {
@@ -38,6 +39,11 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(renameTemplate, forKey: Self.renameTemplateKey) }
     }
 
+    /// Strip text in parentheses/brackets from track titles before Genius search.
+    var stripSearchNoise: Bool {
+        didSet { UserDefaults.standard.set(stripSearchNoise, forKey: Self.stripSearchNoiseKey) }
+    }
+
     init() {
         let defaults = UserDefaults.standard
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -51,6 +57,7 @@ final class AppSettings {
         self.audioFormat    = defaults.string(forKey: Self.audioFormatKey)    ?? "mp3"
         self.geniusToken    = defaults.string(forKey: Self.geniusTokenKey)    ?? ""
         self.renameTemplate = defaults.string(forKey: Self.renameTemplateKey) ?? FilenameTemplate.defaultTemplate
+        self.stripSearchNoise = defaults.object(forKey: Self.stripSearchNoiseKey) as? Bool ?? true
 
         try? FileManager.default.createDirectory(
             at: self.downloadRoot,

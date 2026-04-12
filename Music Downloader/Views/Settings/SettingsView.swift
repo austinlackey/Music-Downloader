@@ -103,12 +103,17 @@ private struct MetadataSettingsTab: View {
                          destination: URL(string: "https://genius.com/api-clients")!)
                 }
                 .font(.caption)
+                Toggle("Strip parentheses & brackets from search", isOn: $settings.stripSearchNoise)
+
             } header: {
                 Text("Genius API")
             } footer: {
-                Text("Required to auto-match tracks and pull artist, album, year, and cover art.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Required to auto-match tracks and pull artist, album, year, and cover art.")
+                    Text("When stripping is enabled, text like (feat. X) or [Official Video] is removed before searching Genius.")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
 
             Section {

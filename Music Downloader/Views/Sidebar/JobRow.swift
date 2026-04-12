@@ -22,9 +22,15 @@ struct JobRow: View {
                 .tint(job.status.tint)
 
             HStack {
-                Text(job.status.displayName)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                if job.isFolderMissing {
+                    Text("Folder missing")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                } else {
+                    Text(job.status.displayName)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer(minLength: 4)
                 if job.totalCount > 0 {
                     Text("\(job.completedCount)/\(job.totalCount)")
