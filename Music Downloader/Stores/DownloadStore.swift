@@ -118,6 +118,64 @@ final class DownloadStore {
         }
     }
 
+    /// Save user-edited metadata directly (no Genius fetch). Writes ID3 tags,
+    /// updates the track model, and optionally renames the file.
+    func saveManualMetadata(
+        track: Track,
+        in job: DownloadJob,
+        metadata: SongMetadata,
+        coverArtData: Data?,
+        settings: AppSettings
+    ) {
+        let template = settings.renameTemplate
+        Task { [weak self] in
+            guard let self, let currentURL = track.fileURL else { return }
+
+            // Capture original filename on first edit for revert support.
+            if track.originalFilename == nil {
+                track.originalFilename = currentURL.deletingPathExtension().lastPathComponent
+            }
+
+            track.enrichmentStatus = .writing
+
+            do {
+                try await writer.write(
+                    metadata: metadata,
+                    coverArtData: coverArtData,
+                    to: currentURL
+                )
+                track.metadata = metadata
+
+                // Rename according to template if title or artist are set.
+                if !metadata.title.isEmpty, !metadata.artist.isEmpty {
+                    let index = (job.tracks.firstIndex(where: { $0.id == track.id }) ?? 0) + 1
+                    let renderedBase = FilenameTemplate.render(
+                        template: template,
+                        metadata: metadata,
+                        trackNumber: index,
+                        originalName: track.originalFilename ?? currentURL.deletingPathExtension().lastPathComponent
+                    )
+                    let ext = currentURL.pathExtension
+                    var newURL = currentURL.deletingLastPathComponent()
+                        .appendingPathComponent(renderedBase)
+                        .appendingPathExtension(ext)
+
+                    if newURL != currentURL {
+                        newURL = Self.uniqueDestination(for: newURL, current: currentURL)
+                        try FileManager.default.moveItem(at: currentURL, to: newURL)
+                        track.fileURL = newURL
+                    }
+                }
+
+                track.enrichmentStatus = .enriched
+            } catch {
+                track.enrichmentStatus = .failed(error.localizedDescription)
+            }
+
+            self.persist()
+        }
+    }
+
     /// Rename a track back to its original yt-dlp filename. Tags stay written;
     /// this only undoes the rename.
     func revertFilename(_ track: Track, in job: DownloadJob) {
