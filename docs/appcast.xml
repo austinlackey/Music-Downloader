@@ -1,0 +1,10 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">
+  <channel>
+    <title>Music Downloader</title>
+    <link>https://austinlackey.github.io/Music-Downloader/appcast.xml</link>
+    <description>Music Downloader Updates</description>
+    <language>en</language>
+
+  </channel>
+</rss>
