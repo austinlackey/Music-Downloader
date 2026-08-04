@@ -5,9 +5,19 @@ struct NewDownloadSheet: View {
     @Environment(AppSettings.self) private var settings
 
     @State private var url: String = ""
+    @State private var mode: DownloadMode = .library
     @FocusState private var urlFieldFocused: Bool
 
-    let onSubmit: (String) -> Void
+    let onSubmit: (String, DownloadMode) -> Void
+
+    /// Where files will actually land, which differs by mode: library-mode
+    /// downloads go to staging first and only reach the library after review.
+    private var destinationDescription: String {
+        switch mode {
+        case .freshFolder: settings.downloadRoot.path
+        case .library:     "Staging → review → \(settings.libraryRoot.path)"
+        }
+    }
 
     private var trimmedURL: String {
         url.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -40,13 +50,27 @@ struct NewDownloadSheet: View {
                     .onSubmit(submit)
             }
 
-            HStack(spacing: 8) {
-                Image(systemName: "folder")
-                    .foregroundStyle(.secondary)
-                Text("Will download to:")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Mode")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text(settings.downloadRoot.path)
+                Picker("Mode", selection: $mode) {
+                    ForEach(DownloadMode.allCases) { option in
+                        Label(option.displayName, systemImage: option.symbolName)
+                            .tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text(mode.explanation)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: mode.symbolName)
+                    .foregroundStyle(.secondary)
+                Text(destinationDescription)
                     .font(.caption)
                     .foregroundStyle(.primary)
                     .lineLimit(1)
@@ -73,9 +97,10 @@ struct NewDownloadSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 520, height: 280)
+        .frame(width: 520, height: 400)
         .onAppear {
             urlFieldFocused = true
+            mode = settings.defaultDownloadMode
             if let pasted = NSPasteboard.general.string(forType: .string),
                URL(string: pasted)?.host?.lowercased().contains("youtu") == true {
                 url = pasted
@@ -85,7 +110,7 @@ struct NewDownloadSheet: View {
 
     private func submit() {
         guard isValidURL else { return }
-        onSubmit(trimmedURL)
+        onSubmit(trimmedURL, mode)
         dismiss()
     }
 }

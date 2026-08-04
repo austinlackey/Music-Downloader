@@ -180,6 +180,10 @@ struct TrackRow: View {
                 Text("Cancelled")
             case .pending, .fetchingMetadata:
                 Text("Queued")
+            case .staged, .merging, .merged:
+                // Job-level states; a track never carries them itself, but the
+                // enum is shared so they have to be handled.
+                Text(track.status.displayName)
             }
         }
     }

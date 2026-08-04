@@ -34,7 +34,7 @@ actor GeniusService {
         try Self.validate(resp, data: data)
 
         let decoded = try JSONDecoder().decode(GeniusSearchResponse.self, from: data)
-        return decoded.response.hits.map(\.result)
+        return Self.rankedHits(decoded.response.hits.map(\.result), for: cleaned)
     }
 
     /// Fetch full song details (album, release date) for a known hit id.
@@ -222,14 +222,151 @@ actor GeniusService {
         return String(date.prefix(4))
     }
 
-    /// Strip parenthesised/bracketed text and common yt-dlp noise so Genius
-    /// search matches better.  e.g. "Song (feat. X) [Official Video]" → "Song"
+    /// Strip common yt-dlp title noise so Genius search matches the canonical
+    /// song instead of lyrics/translation pages.
+    ///
+    /// Keeps meaningful versions like "Remix" or "Live" more often than the
+    /// old blanket parenthesis removal, but drops translation/subtitle labels:
+    /// `Post Malone - Psycho ft. Ty Dolla $ign (Traducción al Español)` becomes
+    /// `Post Malone Psycho`.
     nonisolated static func cleanQuery(_ raw: String) -> String {
         var s = raw
-        // Remove everything inside parentheses and brackets (greedy per pair).
-        s = s.replacingOccurrences(of: #"\s*\([^)]*\)"#, with: "", options: .regularExpression)
-        s = s.replacingOccurrences(of: #"\s*\[[^\]]*\]"#, with: "", options: .regularExpression)
-        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "–", with: "-")
+            .replacingOccurrences(of: "—", with: "-")
+            .replacingOccurrences(of: "｜", with: "|")
+
+        s = removeBracketedNoise(from: s)
+
+        let replacements = [
+            #"\b(?:official\s+)?(?:music\s+)?video\b"#,
+            #"\bofficial\s+audio\b"#,
+            #"\blyrics?\b"#,
+            #"\blyric\s+video\b"#,
+            #"\bvisuali[sz]er\b"#,
+            #"\bHD\b|\b4K\b|\bHQ\b"#,
+            #"\b(?:feat|ft|featuring)\.?\s+.+$"#,
+            #"\s+\|\s+.*$"#,
+        ]
+        for pattern in replacements {
+            s = s.replacingOccurrences(
+                of: pattern,
+                with: " ",
+                options: [.regularExpression, .caseInsensitive]
+            )
+        }
+
+        // Genius tends to search better for "Artist Title" than for the raw
+        // YouTube filename shape "Artist - Title".
+        s = s.replacingOccurrences(
+            of: #"\s+-\s+"#,
+            with: " ",
+            options: .regularExpression
+        )
+
+        return collapseWhitespace(s)
+    }
+
+    private nonisolated static func rankedHits(_ hits: [GeniusHitResult], for query: String) -> [GeniusHitResult] {
+        let queryTokens = Set(tokens(in: query))
+        let normalizedQuery = normalized(query)
+        return hits.enumerated()
+            .sorted { lhs, rhs in
+                let left = score(hit: lhs.element, queryTokens: queryTokens, normalizedQuery: normalizedQuery)
+                let right = score(hit: rhs.element, queryTokens: queryTokens, normalizedQuery: normalizedQuery)
+                if left != right { return left > right }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
+    }
+
+    private nonisolated static func score(
+        hit: GeniusHitResult,
+        queryTokens: Set<String>,
+        normalizedQuery: String
+    ) -> Int {
+        let haystack = "\(hit.title) \(hit.fullTitle) \(hit.primaryArtist.name)"
+        let hitTokens = Set(tokens(in: haystack))
+        let overlap = queryTokens.intersection(hitTokens).count
+
+        var score = overlap * 10
+        if !normalizedQuery.isEmpty && normalized(haystack).contains(normalizedQuery) {
+            score += 8
+        }
+
+        if isLikelyTranslationPage(hit) { score -= 80 }
+        if isLikelyNonCanonicalPage(hit) { score -= 35 }
+        if hit.primaryArtist.name.localizedCaseInsensitiveContains("Genius") { score -= 25 }
+
+        return score
+    }
+
+    private nonisolated static func isLikelyTranslationPage(_ hit: GeniusHitResult) -> Bool {
+        let text = "\(hit.title) \(hit.fullTitle) \(hit.primaryArtist.name) \(hit.url?.absoluteString ?? "")"
+        return containsAnyTranslationSignal(text)
+    }
+
+    private nonisolated static func isLikelyNonCanonicalPage(_ hit: GeniusHitResult) -> Bool {
+        let text = "\(hit.title) \(hit.fullTitle) \(hit.primaryArtist.name)"
+        let pattern = #"\b(lyrics?|romanized|karaoke|cover|sped\s*up|slowed|nightcore|instrumental|acapella|a\s*cappella)\b"#
+        return text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private nonisolated static func removeBracketedNoise(from raw: String) -> String {
+        let pattern = #"\s*[\(\[][^\)\]]*[\)\]]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return raw
+        }
+
+        var result = raw
+        let wholeString = NSRange(raw.startIndex..<raw.endIndex, in: raw)
+        let matches = regex.matches(in: raw, options: [], range: wholeString).reversed()
+
+        for match in matches {
+            guard let range = Range(match.range, in: result) else { continue }
+            let bracketedText = String(result[range])
+            if containsAnyNoiseSignal(bracketedText) {
+                result.replaceSubrange(range, with: " ")
+            }
+        }
+
+        return result
+    }
+
+    private nonisolated static func containsAnyNoiseSignal(_ text: String) -> Bool {
+        containsAnyTranslationSignal(text)
+            || text.range(
+                of: #"\b(official|video|audio|lyrics?|lyric\s+video|visuali[sz]er|HD|4K|HQ)\b"#,
+                options: [.regularExpression, .caseInsensitive]
+            ) != nil
+    }
+
+    private nonisolated static func containsAnyTranslationSignal(_ text: String) -> Bool {
+        text.range(
+            of: #"\b(translation|translated|tradu[cç][aã]o|traducci[oó]n|traduction|[cç]eviri|übersetzung|uebersetzung|перевод|traducere|terjemahan|subtit(?:le|ulado|ulada|ulado)|espa[nñ]ol|portugu[eê]s|deutsch|turkce|türkçe|russian|русский)\b"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
+    private nonisolated static func tokens(in text: String) -> [String] {
+        normalized(text)
+            .split(separator: " ")
+            .map(String.init)
+            .filter { $0.count > 1 }
+    }
+
+    private nonisolated static func normalized(_ text: String) -> String {
+        let folded = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        let stripped = folded.replacingOccurrences(
+            of: #"[^a-z0-9]+"#,
+            with: " ",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        return collapseWhitespace(stripped)
+    }
+
+    private nonisolated static func collapseWhitespace(_ text: String) -> String {
+        text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

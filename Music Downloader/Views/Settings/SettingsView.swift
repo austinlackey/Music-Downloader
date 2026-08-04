@@ -51,6 +51,35 @@ private struct LibrarySettingsTab: View {
                 }
             }
 
+            Section("Master Library") {
+                folderRow("Library", url: settings.libraryRoot) { settings.libraryRoot = $0 }
+                folderRow("Staging", url: settings.stagingRoot) { settings.stagingRoot = $0 }
+                folderRow("Exports", url: settings.exportRoot) { settings.exportRoot = $0 }
+
+                Picker("Library format", selection: $settings.libraryFormat) {
+                    ForEach(AppSettings.supportedFormats, id: \.self) { fmt in
+                        Text(fmt.uppercased()).tag(fmt)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                if settings.libraryFormatIsUnreadable {
+                    Label(
+                        "BingoBite can't read tags from or play \(settings.libraryFormat.uppercased()). Songs in this format won't carry an ID and won't play on iPad.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                }
+
+                Picker("Default mode", selection: $settings.defaultDownloadMode) {
+                    ForEach(DownloadMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
             Section("Audio") {
                 Picker("Format", selection: $settings.audioFormat) {
                     ForEach(AppSettings.supportedFormats, id: \.self) { fmt in
@@ -66,6 +95,30 @@ private struct LibrarySettingsTab: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    @ViewBuilder
+    private func folderRow(
+        _ title: String,
+        url: URL,
+        apply: @escaping (URL) -> Void
+    ) -> some View {
+        LabeledContent(title) {
+            HStack(spacing: 8) {
+                Text(url.path)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Choose…") { pickFolder(startingAt: url, apply: apply) }
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                } label: {
+                    Image(systemName: "folder")
+                }
+                .help("Show in Finder")
+            }
+        }
     }
 
     private func pickFolder(startingAt: URL, apply: @escaping (URL) -> Void) {

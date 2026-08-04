@@ -1,20 +1,36 @@
 import Foundation
 
-/// Writes ID3v2.3 tags (and optionally embedded cover art) to an mp3 file
-/// by shelling out to the bundled ffmpeg binary. Writes to a sibling temp
-/// file and atomically replaces the original.
+/// Writes tags (and optionally embedded cover art) to an audio file by
+/// shelling out to the bundled ffmpeg binary. Writes to a sibling temp file
+/// and atomically replaces the original.
+///
+/// On mp3/wav these land as ID3v2.3 frames — custom keys become TXXX frames.
+/// On m4a they become `----` freeform atoms, on flac Vorbis comments. All
+/// three round-trip through BingoBite's `AudioTagReader`.
 actor MetadataWriter {
+    /// Container formats that accept the ID3v2 muxer flags. Passing them to
+    /// the mp4 or flac muxer makes ffmpeg exit with "Option not found".
+    private static let id3Formats: Set<String> = ["mp3", "wav"]
+
     /// - Parameters:
-    ///   - metadata: resolved song metadata to inject as ID3 tags
+    ///   - metadata: resolved song metadata to inject as tags
     ///   - coverArtData: optional JPEG/PNG bytes to embed as album art
-    ///   - fileURL: path to the existing mp3 (will be replaced in-place)
+    ///   - songUID: stable cross-app identifier, see `SongUID`
+    ///   - sourceVideoID: the YouTube video this came from, if any
+    ///   - fileURL: path to the existing audio file (replaced in-place)
     func write(
         metadata: SongMetadata,
         coverArtData: Data?,
+        songUID: String? = nil,
+        sourceVideoID: String? = nil,
         to fileURL: URL
     ) async throws {
         let dir = fileURL.deletingLastPathComponent()
-        let tempOut = dir.appendingPathComponent(".enrich-\(UUID().uuidString).mp3")
+        // Must match the source container — ffmpeg picks the muxer from the
+        // output extension, and a .mp3 extension on m4a input silently
+        // transcodes or fails.
+        let ext = fileURL.pathExtension.isEmpty ? "mp3" : fileURL.pathExtension
+        let tempOut = dir.appendingPathComponent(".enrich-\(UUID().uuidString).\(ext)")
 
         var tempCover: URL?
         if let coverArtData {
@@ -36,7 +52,15 @@ actor MetadataWriter {
         } else {
             args += ["-map", "0:a"]
         }
-        args += ["-c", "copy", "-id3v2_version", "3", "-write_id3v2", "1"]
+        args += ["-c", "copy"]
+        if tempCover != nil {
+            // Marks the image as cover art rather than a video track. Required
+            // for m4a/flac to store it as artwork at all.
+            args += ["-disposition:v", "attached_pic"]
+        }
+        if Self.id3Formats.contains(ext.lowercased()) {
+            args += ["-id3v2_version", "3", "-write_id3v2", "1"]
+        }
 
         // --- Standard ID3 tags ---
         args += ["-metadata", "title=\(metadata.title)"]
@@ -61,6 +85,14 @@ actor MetadataWriter {
         // language
         if let language = metadata.language, !language.isEmpty {
             args += ["-metadata", "language=\(language)"]
+        }
+
+        // --- Identity frames (read by BingoBite) ---
+        // Written first so they're present even if a later value is malformed.
+        Self.addTXXX(&args, key: SongUID.uidKey, string: songUID)
+        Self.addTXXX(&args, key: SongUID.sourceVideoIDKey, string: sourceVideoID)
+        if let geniusID = metadata.geniusID {
+            Self.addTXXX(&args, key: SongUID.geniusIDKey, string: String(geniusID))
         }
 
         // --- TXXX custom frames ---

@@ -24,6 +24,8 @@ struct JobDetailView: View {
     @State private var showingEnrichConfirm = false
     @State private var showingClearConfirm = false
     @State private var showingRemoveConfirm = false
+    @State private var showingMergeReview = false
+    @State private var showingSongList = false
     @State private var folderMissing = false
     @State private var missingFileCount = 0
     @State private var searchText = ""
@@ -90,6 +92,16 @@ struct JobDetailView: View {
         .toolbar {
             ToolbarItem(placement: .automatic) {
                 if !job.isActive && hasEnrichedTracks {
+                    Button {
+                        showingSongList = true
+                    } label: {
+                        Label("Export Song List", systemImage: "list.bullet.rectangle")
+                    }
+                    .help("Copy a pasteable song list for BingoBite")
+                }
+            }
+            ToolbarItem(placement: .automatic) {
+                if !job.isActive && hasEnrichedTracks {
                     Button(role: .destructive) {
                         showingClearConfirm = true
                     } label: {
@@ -105,6 +117,16 @@ struct JobDetailView: View {
                     } label: {
                         Label("Cancel", systemImage: "stop.circle")
                     }
+                } else if job.awaitsMerge {
+                    // A staged job's next step is merging, not enriching —
+                    // though enrichment is still available from the menu below.
+                    Button {
+                        showingMergeReview = true
+                    } label: {
+                        Label("Review & Merge…", systemImage: "arrow.triangle.merge")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .help("Check these tracks against your library, then merge them in")
                 } else {
                     Button {
                         showingEnrichConfirm = true
@@ -115,10 +137,27 @@ struct JobDetailView: View {
                     .help(enrichButtonHelp)
                 }
             }
+            if job.awaitsMerge {
+                ToolbarItem(placement: .automatic) {
+                    Button {
+                        showingEnrichConfirm = true
+                    } label: {
+                        Label(enrichButtonTitle, systemImage: "sparkles")
+                    }
+                    .disabled(!canEnrich)
+                    .help("Enrich before merging so duplicate detection can use Genius data")
+                }
+            }
+        }
+        .sheet(isPresented: $showingMergeReview) {
+            MergeReviewView(job: job)
+        }
+        .sheet(isPresented: $showingSongList) {
+            PlaylistTextExportSheet(job: job)
         }
         .alert("Clear All Metadata?", isPresented: $showingClearConfirm) {
             Button("Clear", role: .destructive) {
-                store.clearAllMetadata(job: job)
+                store.clearAllMetadata(job: job, settings: settings)
             }
             Button("Cancel", role: .cancel) { }
         } message: {
@@ -126,12 +165,12 @@ struct JobDetailView: View {
         }
         .alert("Enrich Metadata?", isPresented: $showingEnrichConfirm) {
             Button("Enrich", role: .none) {
-                store.enrich(job: job, settings: settings)
+                store.enrich(job: job, settings: settings, force: shouldForceReenrich)
             }
             .keyboardShortcut(.defaultAction)
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("This will search Genius for \(pendingEnrichCount) track\(pendingEnrichCount == 1 ? "" : "s"), inject ID3 tags with artist/album/cover art, and rename files using your template.")
+            Text(enrichConfirmationMessage)
         }
         .sheet(item: $inspectedTrack) { track in
             TrackInspectorSheet(track: track, job: job)
@@ -144,7 +183,13 @@ struct JobDetailView: View {
         } message: {
             Text("The download folder no longer exists. Remove this job from the list?")
         }
-        .onAppear { validatePaths() }
+        .onAppear {
+            validatePaths()
+            Task {
+                await store.hydrateLibraryReferences(job: job, settings: settings)
+                validatePaths()
+            }
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { validatePaths() }
         }
@@ -286,7 +331,17 @@ struct JobDetailView: View {
 
     private var pendingEnrichCount: Int {
         job.tracks.filter {
-            $0.fileURL != nil && $0.enrichmentStatus != .enriched && $0.enrichmentStatus != .skipped
+            $0.fileURL != nil
+                && $0.status == .completed
+                && !$0.isFileMissing
+                && $0.enrichmentStatus != .enriched
+                && $0.enrichmentStatus != .skipped
+        }.count
+    }
+
+    private var reEnrichCount: Int {
+        job.tracks.filter {
+            $0.fileURL != nil && $0.status == .completed && !$0.isFileMissing
         }.count
     }
 
@@ -295,13 +350,17 @@ struct JobDetailView: View {
     }
 
     private var canEnrich: Bool {
-        pendingEnrichCount > 0 && !settings.geniusToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        (pendingEnrichCount > 0 || reEnrichCount > 0)
+            && !settings.geniusToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var enrichButtonTitle: String {
         let enrichedCount = job.tracks.filter { $0.enrichmentStatus == .enriched }.count
         if enrichedCount > 0 && pendingEnrichCount > 0 {
             return "Enrich Remaining"
+        }
+        if pendingEnrichCount == 0 && reEnrichCount > 0 {
+            return "Re-enrich Metadata"
         }
         return "Enrich Metadata"
     }
@@ -311,9 +370,22 @@ struct JobDetailView: View {
             return "Set your Genius API token in Settings first (⌘,)"
         }
         if pendingEnrichCount == 0 {
-            return "All tracks already enriched"
+            return reEnrichCount > 0
+                ? "Re-run Genius matching and rewrite tags for \(reEnrichCount) file\(reEnrichCount == 1 ? "" : "s")"
+                : "No file-backed tracks are available to enrich"
         }
         return "Auto-match \(pendingEnrichCount) track\(pendingEnrichCount == 1 ? "" : "s") on Genius and inject tags"
+    }
+
+    private var shouldForceReenrich: Bool {
+        pendingEnrichCount == 0 && reEnrichCount > 0
+    }
+
+    private var enrichConfirmationMessage: String {
+        if shouldForceReenrich {
+            return "This will re-search Genius for \(reEnrichCount) file-backed track\(reEnrichCount == 1 ? "" : "s"), rewrite ID3 tags with artist/album/cover art, and rename files using your template."
+        }
+        return "This will search Genius for \(pendingEnrichCount) track\(pendingEnrichCount == 1 ? "" : "s"), inject ID3 tags with artist/album/cover art, and rename files using your template."
     }
 
     private var header: some View {

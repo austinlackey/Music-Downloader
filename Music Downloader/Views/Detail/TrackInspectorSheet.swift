@@ -542,8 +542,9 @@ struct TrackInspectorSheet: View {
                 TextField("Custom query (e.g. \"Artist Title\")", text: $customQuery)
                     .textFieldStyle(.roundedBorder)
                     .disabled(isResearching)
+                    .onSubmit(submitResearch)
                 Button {
-                    Task { await researchWithCustomQuery() }
+                    submitResearch()
                 } label: {
                     if isResearching {
                         ProgressView().controlSize(.small)
@@ -565,7 +566,7 @@ struct TrackInspectorSheet: View {
                 if track.originalFilename != nil,
                    track.fileURL?.deletingPathExtension().lastPathComponent != track.originalFilename {
                     Button {
-                        store.revertFilename(track, in: job)
+                        store.revertFilename(track, in: job, settings: settings)
                     } label: {
                         Label("Revert Filename", systemImage: "arrow.uturn.backward")
                     }
@@ -678,6 +679,13 @@ struct TrackInspectorSheet: View {
         store.applyMatch(hit, to: track, in: job, settings: settings)
     }
 
+    private func submitResearch() {
+        guard !isResearching,
+              !customQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return }
+        Task { await researchWithCustomQuery() }
+    }
+
     private func researchWithCustomQuery() async {
         let query = customQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return }
@@ -747,45 +755,3 @@ private struct HitRow: View {
 }
 
 // MARK: - Flow layout for media link pills
-
-private struct FlowLayout: Layout {
-    var spacing: CGFloat = 8
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let result = layout(in: proposal.width ?? 0, subviews: subviews)
-        return result.size
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let result = layout(in: bounds.width, subviews: subviews)
-        for (index, origin) in result.origins.enumerated() {
-            subviews[index].place(
-                at: CGPoint(x: bounds.minX + origin.x, y: bounds.minY + origin.y),
-                proposal: .unspecified
-            )
-        }
-    }
-
-    private func layout(in width: CGFloat, subviews: Subviews) -> (size: CGSize, origins: [CGPoint]) {
-        var origins: [CGPoint] = []
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var rowHeight: CGFloat = 0
-        var maxWidth: CGFloat = 0
-
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x + size.width > width, x > 0 {
-                x = 0
-                y += rowHeight + spacing
-                rowHeight = 0
-            }
-            origins.append(CGPoint(x: x, y: y))
-            rowHeight = max(rowHeight, size.height)
-            x += size.width + spacing
-            maxWidth = max(maxWidth, x - spacing)
-        }
-
-        return (CGSize(width: maxWidth, height: y + rowHeight), origins)
-    }
-}

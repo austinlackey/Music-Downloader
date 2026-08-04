@@ -12,25 +12,37 @@ struct ContentView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(PlaybackController.self) private var playback
 
-    @State private var selection: DownloadJob.ID?
+    @State private var selection: SidebarSelection?
     @State private var showingNewDownload = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
+    /// The job the sidebar is pointing at, if it's pointing at one at all.
+    private var selectedJob: DownloadJob? {
+        guard case .job(let id) = selection else { return nil }
+        return store.jobs.first { $0.id == id }
+    }
+
+    private var isShowingLibrary: Bool { selection == .library }
+
+    /// Split out of `body` — inlining it makes the type-checker give up on
+    /// the whole `NavigationSplitView` expression.
+    @ViewBuilder
+    private var detailContent: some View {
+        if isShowingLibrary {
+            LibraryView()
+        } else if let job = selectedJob {
+            JobDetailView(job: job)
+        } else {
+            EmptyDetailView { showingNewDownload = true }
+        }
+    }
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView(selection: $selection)
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
         } detail: {
-            Group {
-                if let id = selection,
-                   let job = store.jobs.first(where: { $0.id == id }) {
-                    JobDetailView(job: job)
-                } else {
-                    EmptyDetailView {
-                        showingNewDownload = true
-                    }
-                }
-            }
+            detailContent
             .toolbar {
                 ToolbarItem(placement: .navigation) {
                     Button {
@@ -42,9 +54,10 @@ struct ContentView: View {
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
-                        if let id = selection,
-                           let job = store.jobs.first(where: { $0.id == id }) {
+                        if let job = selectedJob {
                             store.revealInFinder(job)
+                        } else if selection == .library {
+                            NSWorkspace.shared.activateFileViewerSelecting([settings.libraryRoot])
                         } else {
                             NSWorkspace.shared.activateFileViewerSelecting([settings.downloadRoot])
                         }
@@ -56,16 +69,24 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showingNewDownload) {
-            NewDownloadSheet { url in
-                store.startDownload(url: url, settings: settings)
+            NewDownloadSheet { url, mode in
+                store.startDownload(url: url, mode: mode, settings: settings)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .newDownloadRequested)) { _ in
             showingNewDownload = true
         }
         .onAppear {
-            // Auto-select the most recent job on launch.
-            if selection == nil { selection = store.jobs.first?.id }
+            guard selection == nil else { return }
+            // Prefer a job that's waiting on the user, then the most recent
+            // job, then fall back to the library.
+            if let staged = store.jobs.first(where: \.awaitsMerge) {
+                selection = .job(staged.id)
+            } else if let recent = store.jobs.first {
+                selection = .job(recent.id)
+            } else {
+                selection = .library
+            }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if playback.currentTrack != nil {
