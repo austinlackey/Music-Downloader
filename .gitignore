@@ -11,3 +11,11 @@ xcuserdata/
 # Vendored binaries (large; fetched via scripts/fetch-vendor.sh)
 Vendor/yt-dlp/yt-dlp_macos
 Vendor/ffmpeg/ffmpeg
+
+# Signing key material — never commit
+*.p12
+*.pfx
+*.cer
+*.pem
+*.key
+*.mobileprovision
