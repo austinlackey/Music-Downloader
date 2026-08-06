@@ -178,6 +178,9 @@ struct TrackRow: View {
                 Text("Failed")
             case .cancelled:
                 Text("Cancelled")
+            case .unavailable:
+                Text("Unavailable")
+                    .foregroundStyle(.secondary)
             case .pending, .fetchingMetadata:
                 Text("Queued")
             case .staged, .merging, .merged:

@@ -434,8 +434,13 @@ final class DownloadStore {
             }
 
             if job.status == .downloading {
-                let allCompleted = job.tracks.allSatisfy { $0.status == .completed }
-                let anyCompleted = job.tracks.contains { $0.status == .completed }
+                // Judge completion only on tracks YouTube still serves. Entries
+                // that no longer exist can never complete, and holding the job
+                // open for them would leave every ageing playlist "failed".
+                let available = job.availableTracks
+                let allCompleted = !available.isEmpty
+                    && available.allSatisfy { $0.status == .completed }
+                let anyCompleted = available.contains { $0.status == .completed }
                 if job.mode == .library {
                     // A partial download is still worth reviewing — the tracks
                     // that did land are usable.
@@ -653,6 +658,13 @@ final class DownloadStore {
                         .deletingPathExtension()
                         .lastPathComponent
                 }
+            }
+
+        case .trackUnavailable(let id, let reason):
+            if let track = job.tracks.first(where: { $0.id == id }) {
+                track.status = .unavailable
+                track.unavailableReason = reason
+                track.progress = 0
             }
 
         case .failed(let msg):
@@ -890,6 +902,8 @@ final class DownloadStore {
         /// value it would have had.
         let songUID: String?
         let sourceDuration: Double?
+        /// Optional so pre-existing jobs.json files still decode.
+        let unavailableReason: String?
     }
 
     private func persist() {
@@ -929,7 +943,8 @@ final class DownloadStore {
                         enrichmentStatus: frozen,
                         alternativeMatches: track.alternativeMatches,
                         songUID: track.songUID,
-                        sourceDuration: track.sourceDuration
+                        sourceDuration: track.sourceDuration,
+                        unavailableReason: track.unavailableReason
                     )
                 },
                 mode: job.mode,
@@ -966,6 +981,7 @@ final class DownloadStore {
                     t.enrichmentStatus = ts.enrichmentStatus ?? .notStarted
                     t.alternativeMatches = ts.alternativeMatches ?? []
                     t.sourceDuration = ts.sourceDuration
+                    t.unavailableReason = ts.unavailableReason
                     return t
                 },
                 status: snap.status,

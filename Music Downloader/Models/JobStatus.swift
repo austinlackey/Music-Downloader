@@ -9,6 +9,10 @@ enum JobStatus: String, Codable, Hashable, Sendable {
     case completed
     case failed
     case cancelled
+    /// Track only: YouTube no longer serves this video (deleted, private, or
+    /// region-blocked). Not a failure — the playlist metadata simply outlived
+    /// the video, so it is excluded from progress and completion math.
+    case unavailable
     /// Library mode: downloaded and enriched, waiting for merge review.
     case staged
     /// Library mode: files are being moved into the library right now.
@@ -24,6 +28,7 @@ enum JobStatus: String, Codable, Hashable, Sendable {
         case .completed:        "Completed"
         case .failed:           "Failed"
         case .cancelled:        "Cancelled"
+        case .unavailable:      "Unavailable"
         case .staged:           "Ready to merge"
         case .merging:          "Merging…"
         case .merged:           "In library"
@@ -38,6 +43,7 @@ enum JobStatus: String, Codable, Hashable, Sendable {
         case .completed:        "checkmark.circle.fill"
         case .failed:           "exclamationmark.triangle.fill"
         case .cancelled:        "xmark.circle"
+        case .unavailable:      "eye.slash"
         case .staged:           "tray.full.fill"
         case .merging:          "arrow.triangle.merge"
         case .merged:           "books.vertical.fill"
@@ -52,6 +58,7 @@ enum JobStatus: String, Codable, Hashable, Sendable {
         case .completed:        .green
         case .failed:           .red
         case .cancelled:        .secondary
+        case .unavailable:      .secondary
         case .staged:           .orange
         case .merging:          .accentColor
         case .merged:           .green
@@ -69,6 +76,7 @@ enum JobStatus: String, Codable, Hashable, Sendable {
         case .merged:           6
         case .failed:           7
         case .cancelled:        8
+        case .unavailable:      9
         }
     }
 

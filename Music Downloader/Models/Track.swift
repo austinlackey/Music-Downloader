@@ -12,6 +12,9 @@ final class Track: Identifiable {
     /// 0.0 ... 1.0
     var progress: Double = 0
     var fileURL: URL?
+    /// Why YouTube refused to serve this video, when `status == .unavailable`.
+    /// yt-dlp's own wording, e.g. "Video unavailable" or "Private video".
+    var unavailableReason: String?
 
     // Metadata enrichment (Phase 2)
     /// Original filename (without extension) as yt-dlp wrote it. Captured on

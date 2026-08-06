@@ -65,17 +65,34 @@ final class DownloadJob: Identifiable {
         }
     }
 
+    /// Entries YouTube no longer serves — deleted, private, or region-blocked.
+    /// Playlists routinely outlive their videos, so these are reported to the
+    /// user but kept out of every count below: a job is not "43 of 50" when
+    /// seven of those fifty stopped existing years ago.
+    var unavailableTracks: [Track] {
+        tracks.filter { $0.status == .unavailable }
+    }
+
+    /// Tracks that YouTube can actually still serve. The denominator for all
+    /// progress and completion math.
+    var availableTracks: [Track] {
+        tracks.filter { $0.status != .unavailable }
+    }
+
+    var unavailableCount: Int { unavailableTracks.count }
+
     /// Average per-track progress, 0...1.
     var overallProgress: Double {
-        guard !tracks.isEmpty else { return 0 }
-        return tracks.map(\.progress).reduce(0, +) / Double(tracks.count)
+        let available = availableTracks
+        guard !available.isEmpty else { return 0 }
+        return available.map(\.progress).reduce(0, +) / Double(available.count)
     }
 
     var completedCount: Int {
         tracks.filter { $0.status == .completed }.count
     }
 
-    var totalCount: Int { tracks.count }
+    var totalCount: Int { availableTracks.count }
 
     var isActive: Bool {
         status == .fetchingMetadata || status == .downloading || status == .pending

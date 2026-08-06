@@ -129,6 +129,30 @@ actor YTDLPService {
             return
         }
 
+        // Drain stderr concurrently. Reading it only after the process exits
+        // deadlocks a playlist with many dead entries: yt-dlp blocks once the
+        // 64 KB pipe buffer fills, stdout goes quiet, and the loop below waits
+        // forever on a process that is itself waiting on us.
+        let errHandle = errPipe.fileHandleForReading
+        let stderrTask = Task<[String], Never> {
+            var lines: [String] = []
+            do {
+                for try await line in errHandle.bytes.lines {
+                    lines.append(line)
+                    // Surface dead entries as they appear so the UI can mark
+                    // the track instead of waiting for the run to end.
+                    if let dead = ProgressParser.unavailableVideo(from: line) {
+                        continuation.yield(
+                            .trackUnavailable(videoID: dead.videoID, reason: dead.reason)
+                        )
+                    }
+                }
+            } catch {
+                lines.append("stderr read error: \(error.localizedDescription)")
+            }
+            return lines
+        }
+
         // Read stdout line-by-line via the async byte stream.
         do {
             for try await line in outPipe.fileHandleForReading.bytes.lines {
@@ -142,17 +166,28 @@ actor YTDLPService {
             continuation.yield(.logLine("stdout read error: \(error.localizedDescription)"))
         }
 
+        let errLines = await stderrTask.value
         proc.waitUntilExit()
         let status = proc.terminationStatus
         self.running[jobID] = nil
 
+        let hardErrors = errLines.filter(ProgressParser.isHardError)
+        let deadEntryCount = errLines.compactMap(ProgressParser.unavailableVideo).count
+
         if status == 0 {
             continuation.yield(.finished)
+        } else if hardErrors.isEmpty && deadEntryCount > 0 {
+            // yt-dlp exits non-zero when *any* playlist entry fails, so a
+            // handful of deleted videos would otherwise sink the whole job.
+            // Everything that went wrong was a dead entry, already reported
+            // above as .trackUnavailable — the rest of the run was fine.
+            continuation.yield(.finished)
         } else {
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let msg = String(data: errData, encoding: .utf8)?
+            // Prefer the recognised errors, but never swallow an unexplained
+            // non-zero exit: fall back to the raw stderr so the cause survives.
+            let msg = (hardErrors.isEmpty ? errLines : hardErrors)
+                .joined(separator: "\n")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-                ?? "yt-dlp exited \(status)"
             continuation.yield(.failed(msg.isEmpty ? "yt-dlp exited \(status)" : msg))
         }
         continuation.finish()

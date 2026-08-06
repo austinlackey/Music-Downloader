@@ -28,6 +28,7 @@ struct JobDetailView: View {
     @State private var showingSongList = false
     @State private var folderMissing = false
     @State private var missingFileCount = 0
+    @State private var showingUnavailable = false
     @State private var searchText = ""
     @State private var sortField: TrackSortField = .number
     @State private var sortDirection: SortDirection = .ascending
@@ -198,12 +199,15 @@ struct JobDetailView: View {
     // MARK: - Search & Sort
 
     private var sortedFilteredTracks: [(offset: Int, element: Track)] {
+        // Dead entries are reported in their own banner, not mixed into the
+        // song list — they have no file, no metadata, and nothing to act on.
+        let listable = job.availableTracks
         let filtered: [(offset: Int, element: Track)]
         if searchText.isEmpty {
-            filtered = Array(job.tracks.enumerated()).map { (offset: $0.offset, element: $0.element) }
+            filtered = Array(listable.enumerated()).map { (offset: $0.offset, element: $0.element) }
         } else {
             let query = searchText.lowercased()
-            filtered = Array(job.tracks.enumerated())
+            filtered = Array(listable.enumerated())
                 .map { (offset: $0.offset, element: $0.element) }
                 .filter { _, track in
                     track.title.lowercased().contains(query)
@@ -429,6 +433,10 @@ struct JobDetailView: View {
                 .tint(job.status.tint)
             }
 
+            if job.unavailableCount > 0 {
+                unavailableBanner
+            }
+
             if let error = job.errorMessage, job.status == .failed {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
@@ -438,6 +446,78 @@ struct JobDetailView: View {
                     .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
             }
         }
+    }
+
+    /// Playlists outlive their videos. State that plainly instead of leaving
+    /// yt-dlp's raw stderr on screen, which reads like the download broke.
+    ///
+    /// The list lives in a popover rather than expanding inline: `header` sits
+    /// above the track List with no scroll view of its own, so growing it
+    /// pushes the songs off-screen, and untruncated titles drag the detail
+    /// column's ideal width wide enough to collapse the sidebar.
+    private var unavailableBanner: some View {
+        let count = job.unavailableCount
+        return Button {
+            showingUnavailable = true
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "eye.slash")
+                Text("\(count) song\(count == 1 ? "" : "s") no longer available on YouTube")
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text("View")
+                    .fontWeight(.semibold)
+                Image(systemName: "chevron.right")
+                    .imageScale(.small)
+            }
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showingUnavailable, arrowEdge: .bottom) {
+            unavailableList
+        }
+    }
+
+    /// Fixed width so long titles wrap inside the popover instead of widening
+    /// it, and a capped scroll height so a badly rotted playlist stays usable.
+    private var unavailableList: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("No longer on YouTube")
+                .font(.headline)
+            Text("These were in the playlist but have since been deleted, made private, or blocked. They aren't counted in the totals.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 7) {
+                    ForEach(job.unavailableTracks) { track in
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(track.title.isEmpty ? track.id : track.title)
+                                .font(.caption)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if let reason = track.unavailableReason {
+                                Text(reason)
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .frame(maxHeight: 220)
+        }
+        .padding(14)
+        .frame(width: 330)
     }
 
     private var statusBadge: some View {
