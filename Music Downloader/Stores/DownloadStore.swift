@@ -397,6 +397,13 @@ final class DownloadStore {
                 track.status = .failed
                 track.errorMessage = message
 
+            case .runFailed(let kind):
+                // One song, so the run failing and the track failing are the
+                // same event. The job-level banner explains the remedy.
+                track.status = .failed
+                track.errorMessage = kind.title
+                job.failureKind = kind
+
             case .finished, .logLine:
                 break
             }
@@ -827,6 +834,10 @@ final class DownloadStore {
             }
 
             job.status = .downloading
+            // Last run's diagnosis must not outlive it — an update may already
+            // have fixed the thing it was reporting.
+            job.failureKind = nil
+            job.errorMessage = nil
             for await event in await service.download(
                 url: job.url,
                 outputDir: folder,
@@ -1069,6 +1080,11 @@ final class DownloadStore {
             job.status = .failed
             job.errorMessage = msg
 
+        case .runFailed(let kind):
+            job.status = .failed
+            job.failureKind = kind
+            job.errorMessage = kind.explanation
+
         case .finished, .logLine:
             break
         }
@@ -1284,6 +1300,10 @@ final class DownloadStore {
         let mode: DownloadMode?
         let stagingPath: String?
         let skippedVideoIDs: [String]?
+        /// Optional so existing jobs.json files still decode. Persisted so the
+        /// banner keeps offering the update that fixes it across a relaunch --
+        /// the explanation surviving without its button would be a dead end.
+        let failureKind: RunFailureKind?
     }
     private struct TrackSnapshot: Codable {
         let id: String
@@ -1351,7 +1371,8 @@ final class DownloadStore {
                 },
                 mode: job.mode,
                 stagingPath: job.stagingURL?.path,
-                skippedVideoIDs: job.skippedVideoIDs
+                skippedVideoIDs: job.skippedVideoIDs,
+                failureKind: job.failureKind
             )
         }
         do {
@@ -1398,6 +1419,7 @@ final class DownloadStore {
                 skippedVideoIDs: snap.skippedVideoIDs ?? []
             )
             job.errorMessage = snap.errorMessage
+            job.failureKind = snap.failureKind
             if job.isLibraryMerged,
                let libraryFile = job.tracks.compactMap(\.fileURL).first {
                 job.folderURL = libraryFile.deletingLastPathComponent()

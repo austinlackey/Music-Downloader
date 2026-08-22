@@ -13,6 +13,10 @@ final class DownloadJob: Identifiable {
     var tracks: [Track]
     var status: JobStatus
     var errorMessage: String?
+    /// Why the whole run failed, when it failed for a reason the user can act
+    /// on. Drives the banner that offers the remedy, so it is persisted --
+    /// relaunching the app does not un-stale the bundled downloader.
+    var failureKind: RunFailureKind?
     let createdAt: Date
 
     /// Where this job's files are destined. Library-mode jobs download to

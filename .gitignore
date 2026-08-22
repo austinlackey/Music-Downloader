@@ -8,7 +8,8 @@ xcuserdata/
 # macOS
 .DS_Store
 
-# Vendored binaries (large; fetched via scripts/fetch-vendor.sh)
+# Vendored binaries (large; fetched via ./scripts/fetch-vendor.sh).
+# Vendor/yt-dlp.lock IS tracked -- it records which yt-dlp each release shipped.
 Vendor/yt-dlp/yt-dlp_macos
 Vendor/ffmpeg/ffmpeg
 

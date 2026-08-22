@@ -8,7 +8,42 @@ nonisolated enum YTDLPEvent: Sendable {
     case trackUnavailable(videoID: String, reason: String, kind: UnavailableKind)
     case logLine(String)
     case failed(String)
+    /// The whole run failed for a reason the user can act on. Distinct from
+    /// `failed`, which carries yt-dlp's raw words because we have nothing
+    /// better to say.
+    case runFailed(RunFailureKind)
     case finished
+}
+
+/// Why a whole run failed, as opposed to one entry failing.
+///
+/// Worth distinguishing because the remedy is completely different: a run that
+/// fails this way is not the playlist's fault and retrying it will not help.
+nonisolated enum RunFailureKind: String, Codable, Sendable, Hashable, CaseIterable {
+    /// YouTube rejected the stream URLs yt-dlp had already resolved, or yt-dlp
+    /// could not solve YouTube's signature challenge at all. Both mean the
+    /// bundled yt-dlp is older than YouTube's current player.
+    case outdatedDownloader
+
+    var symbolName: String {
+        switch self {
+        case .outdatedDownloader: "clock.badge.exclamationmark"
+        }
+    }
+
+    /// Headline for the banner. Says what is wrong, not what yt-dlp printed.
+    var title: String {
+        switch self {
+        case .outdatedDownloader: "The YouTube downloader is out of date"
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .outdatedDownloader:
+            "YouTube periodically changes how it signs downloads, and the copy of yt-dlp bundled with this version can no longer keep up — that's why the songs failed rather than anything being wrong with this playlist. Installing the latest app update replaces it with a current one."
+        }
+    }
 }
 
 /// Why yt-dlp could not fetch a particular playlist entry.
@@ -197,6 +232,38 @@ nonisolated enum ProgressParser {
     static func isHardError(_ line: String) -> Bool {
         line.trimmingCharacters(in: .whitespaces).hasPrefix("ERROR:")
             && unavailableVideo(from: line) == nil
+    }
+
+    /// Phrases meaning YouTube refused a stream yt-dlp had already resolved, or
+    /// that yt-dlp could not solve YouTube's signature challenge at all.
+    ///
+    /// Matched against the whole line rather than a message body: unlike
+    /// per-entry errors, yt-dlp reports these without an `[extractor] <id>:`
+    /// prefix, e.g. `ERROR: unable to download video data: HTTP Error 403:
+    /// Forbidden`.
+    private static let outdatedDownloaderPhrases = [
+        "http error 403: forbidden",
+        "nsig extraction failed",
+        "signature extraction failed",
+        "unable to extract signature",
+        "the page needs to be reloaded",
+    ]
+
+    static func isOutdatedDownloaderError(_ line: String) -> Bool {
+        let haystack = line.lowercased()
+        return outdatedDownloaderPhrases.contains(where: haystack.contains)
+    }
+
+    /// Classifies a finished run's unrecognised errors, or nil when they should
+    /// be reported verbatim.
+    ///
+    /// Requires the stale-downloader signature to account for at least half of
+    /// them. A single transient 403 alongside genuine failures should still
+    /// surface the genuine ones rather than blaming the downloader.
+    static func runFailure(from hardErrors: [String]) -> RunFailureKind? {
+        guard !hardErrors.isEmpty else { return nil }
+        let matching = hardErrors.filter(isOutdatedDownloaderError).count
+        return matching * 2 >= hardErrors.count ? .outdatedDownloader : nil
     }
 
     /// YouTube video ids are 11 characters of `[A-Za-z0-9_-]`.

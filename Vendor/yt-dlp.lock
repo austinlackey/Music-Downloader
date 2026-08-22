@@ -1,0 +1,6 @@
+# Vendored yt-dlp pinned for reproducible builds. Written by
+# scripts/fetch-vendor.sh -- do not edit by hand.
+# Refresh with: ./scripts/fetch-vendor.sh latest
+version = 2026.08.19
+sha256 = 0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202
+source = https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_macos

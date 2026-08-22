@@ -248,6 +248,11 @@ actor YTDLPService {
             // Everything that went wrong was a dead entry, already reported
             // above as .trackUnavailable — the rest of the run was fine.
             continuation.yield(.finished)
+        } else if let kind = ProgressParser.runFailure(from: hardErrors) {
+            // A wall of identical "HTTP Error 403: Forbidden" lines is not
+            // something to show the user verbatim — it reads as "the app is
+            // broken" when the actual remedy is an app update.
+            continuation.yield(.runFailed(kind))
         } else {
             // Prefer the recognised errors, but never swallow an unexplained
             // non-zero exit: fall back to the raw stderr so the cause survives.

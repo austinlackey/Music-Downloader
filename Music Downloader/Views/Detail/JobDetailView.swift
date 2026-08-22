@@ -664,7 +664,9 @@ struct JobDetailView: View {
                 unavailableBanner
             }
 
-            if let error = job.errorMessage, job.status == .failed {
+            if let failure = job.failureKind, job.status == .failed {
+                outdatedDownloaderBanner(failure)
+            } else if let error = job.errorMessage, job.status == .failed {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.red)
@@ -673,6 +675,39 @@ struct JobDetailView: View {
                     .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
             }
         }
+    }
+
+    /// A run that failed because the bundled yt-dlp aged out.
+    ///
+    /// Replaces the raw stderr dump, which for this failure is dozens of
+    /// identical "HTTP Error 403: Forbidden" lines — technically the truth, but
+    /// it reads as "this app is broken" and hides the one thing that fixes it.
+    ///
+    /// Strictly one line, for the same reason `unavailableBanner` is: `header`
+    /// has no scroll view of its own, so a banner that wraps pushes the track
+    /// list off-screen and widens the detail column until the sidebar
+    /// collapses. The full explanation lives in the tooltip.
+    private func outdatedDownloaderBanner(_ failure: RunFailureKind) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: failure.symbolName)
+            Text(failure.title)
+                .lineLimit(1)
+
+            Spacer(minLength: 8)
+
+            Button("Check for Updates…") {
+                NotificationCenter.default.post(
+                    name: .checkForUpdatesRequested,
+                    object: nil
+                )
+            }
+            .controlSize(.small)
+        }
+        .font(.caption)
+        .help(failure.explanation)
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
     }
 
     /// Playlists outlive their videos. State that plainly instead of leaving

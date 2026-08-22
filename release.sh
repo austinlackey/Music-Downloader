@@ -59,6 +59,16 @@ fi
 
 mkdir -p "$BUILD_DIR"
 
+# ─── Step 0: Refresh vendored binaries ──────────────────────────────────────
+# Every release ships whatever yt-dlp is sitting in Vendor/, and YouTube breaks
+# old builds outright rather than gracefully. Fetching here means a release can
+# never quietly go out with a stale downloader, and Vendor/yt-dlp.lock records
+# exactly which version this build shipped.
+echo "📥 Checking vendored binaries..."
+"$SCRIPT_DIR/scripts/fetch-vendor.sh"
+YTDLP_VERSION=$("$SCRIPT_DIR/Vendor/yt-dlp/yt-dlp_macos" --version 2>/dev/null || echo unknown)
+echo "   Shipping yt-dlp $YTDLP_VERSION"
+
 # ─── Update version in Xcode project ───────────────────────────────────────
 echo "📝 Updating MARKETING_VERSION in project.pbxproj to ${VERSION}..."
 sed -i '' "s/MARKETING_VERSION = .*;/MARKETING_VERSION = ${VERSION};/g" \
@@ -173,7 +183,10 @@ rm "$ITEM_FILE"
 echo "📤 Pushing appcast update..."
 echo "- Bug fixes and improvements" > "$RELEASE_NOTES"
 git add "$APPCAST" "$RELEASE_NOTES" "$SCRIPT_DIR/Music Downloader.xcodeproj/project.pbxproj"
-git commit -m "Release v${VERSION}"
+git add -f "$SCRIPT_DIR/Vendor/yt-dlp.lock" 2>/dev/null || true
+git commit -m "Release v${VERSION}
+
+Ships yt-dlp ${YTDLP_VERSION}."
 git push
 
 # ─── Cleanup ────────────────────────────────────────────────────────────────

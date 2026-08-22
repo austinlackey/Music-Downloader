@@ -31,6 +31,13 @@ struct Music_DownloaderApp: App {
                 .environment(settings)
                 .environment(playback)
                 .frame(minWidth: 880, minHeight: 560)
+                // Lets a failed download offer the update that fixes it,
+                // rather than only the Apple menu knowing how.
+                .onReceive(
+                    NotificationCenter.default.publisher(for: .checkForUpdatesRequested)
+                ) { _ in
+                    updaterController.updater.checkForUpdates()
+                }
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
@@ -55,4 +62,5 @@ struct Music_DownloaderApp: App {
 
 extension Notification.Name {
     static let newDownloadRequested = Notification.Name("newDownloadRequested")
+    static let checkForUpdatesRequested = Notification.Name("checkForUpdatesRequested")
 }
