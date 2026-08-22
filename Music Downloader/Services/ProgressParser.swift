@@ -5,21 +5,67 @@ nonisolated enum YTDLPEvent: Sendable {
     case trackStarted(videoID: String, title: String, index: Int)
     case trackProgress(videoID: String, fraction: Double)
     case trackFinished(videoID: String, filePath: String)
-    case trackUnavailable(videoID: String, reason: String)
+    case trackUnavailable(videoID: String, reason: String, kind: UnavailableKind)
     case logLine(String)
     case failed(String)
     case finished
 }
 
-/// A playlist entry YouTube will not serve any more.
+/// Why yt-dlp could not fetch a particular playlist entry.
 ///
-/// Old playlists accumulate these: the video is deleted, made private, or
-/// blocked, but the playlist still lists it. yt-dlp reports each one on stderr
-/// and then exits non-zero, which would otherwise sink an otherwise-fine run.
+/// Both kinds are per-entry, not per-run: neither should sink a job that is
+/// otherwise fine. They differ in whether the video still exists, which is the
+/// difference between "give up on it" and "sign in and try again".
+nonisolated enum UnavailableKind: String, Codable, Sendable, Hashable, CaseIterable {
+    /// Deleted, private, terminated, or region-blocked. Nothing to retry.
+    case removed
+    /// Age-gated. YouTube still has the video; it wants a signed-in session
+    /// before it will serve it.
+    case ageRestricted
+
+    var displayName: String {
+        switch self {
+        case .removed:       "Unavailable"
+        case .ageRestricted: "Age-restricted"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .removed:       "eye.slash"
+        case .ageRestricted: "person.crop.circle.badge.exclamationmark"
+        }
+    }
+
+    /// Headline for the banner and popover grouping these entries.
+    var groupTitle: String {
+        switch self {
+        case .removed:       "No longer on YouTube"
+        case .ageRestricted: "Age-restricted"
+        }
+    }
+
+    var groupExplanation: String {
+        switch self {
+        case .removed:
+            "These were in the playlist but have since been deleted, made private, or blocked. They aren't counted in the totals."
+        case .ageRestricted:
+            "YouTube requires a signed-in, age-verified session for these. They aren't counted in the totals — sign in to YouTube in Safari or Chrome, then turn on browser cookies in Settings and re-run the download."
+        }
+    }
+}
+
+/// A playlist entry YouTube will not serve.
+///
+/// Old playlists accumulate these: the video is deleted, made private, blocked,
+/// or age-gated, but the playlist still lists it. yt-dlp reports each one on
+/// stderr and then exits non-zero, which would otherwise sink an
+/// otherwise-fine run.
 nonisolated struct UnavailableVideo: Sendable, Hashable {
     let videoID: String
     /// yt-dlp's own wording, trimmed of its trailing boilerplate.
     let reason: String
+    let kind: UnavailableKind
 }
 
 /// Parses lines emitted by yt-dlp's `--progress-template` and `--print` flags.
@@ -72,9 +118,9 @@ nonisolated enum ProgressParser {
     /// Phrases yt-dlp uses when YouTube itself refuses to serve a video.
     ///
     /// Deliberately narrow: anything not listed here (network drops, ffmpeg
-    /// faults, throttling, sign-in walls) stays a real error and still fails
+    /// faults, throttling, bot checks) stays a real error and still fails
     /// the job. Matched case-insensitively against the message body.
-    private static let unavailablePhrases = [
+    private static let removedPhrases = [
         "video unavailable",
         "this video is not available",
         "this video is no longer available",
@@ -89,10 +135,24 @@ nonisolated enum ProgressParser {
         "this video has been removed for violating",
     ]
 
-    /// Recognises a stderr line reporting a video YouTube no longer serves.
+    /// Phrases for the age gate. Distinct from the list above because the
+    /// video still exists — the run needs credentials, not a different video.
+    ///
+    /// Note the deliberate omission of "sign in to confirm you're not a bot",
+    /// which is rate-limiting aimed at the whole run rather than one entry and
+    /// must keep failing the job.
+    private static let ageRestrictedPhrases = [
+        "confirm your age",
+        "age-restricted",
+        "age restricted",
+        "inappropriate for some users",
+    ]
+
+    /// Recognises a stderr line reporting a video YouTube will not serve.
     ///
     /// yt-dlp writes these as:
     /// `ERROR: [youtube] <id>: Video unavailable. This video is not available`
+    /// `ERROR: [youtube] <id>: Sign in to confirm your age. This video may be…`
     ///
     /// Returns nil for any other error so genuine failures stay failures.
     static func unavailableVideo(from line: String) -> UnavailableVideo? {
@@ -111,14 +171,25 @@ nonisolated enum ProgressParser {
         let message = afterBracket[afterBracket.index(after: colon)...]
             .trimmingCharacters(in: .whitespaces)
         let haystack = message.lowercased()
-        guard unavailablePhrases.contains(where: haystack.contains) else { return nil }
+
+        // Age is checked first: YouTube's age-gate copy ("This video may be
+        // inappropriate…") does not overlap the removal phrases, but checking
+        // in this order keeps the classification stable if it ever does.
+        let kind: UnavailableKind
+        if ageRestrictedPhrases.contains(where: haystack.contains) {
+            kind = .ageRestricted
+        } else if removedPhrases.contains(where: haystack.contains) {
+            kind = .removed
+        } else {
+            return nil
+        }
 
         // "Video unavailable. This video is not available" → "Video unavailable"
         let reason = message
             .split(separator: ".", maxSplits: 1)
             .first
             .map { $0.trimmingCharacters(in: .whitespaces) } ?? message
-        return UnavailableVideo(videoID: videoID, reason: reason)
+        return UnavailableVideo(videoID: videoID, reason: reason, kind: kind)
     }
 
     /// True when a stderr line is an error we do NOT recognise as an

@@ -135,6 +135,17 @@ struct TrackRow: View {
                 .font(.caption2)
                 .foregroundStyle(.orange)
                 .lineLimit(1)
+        } else if track.status == .failed, let message = track.errorMessage {
+            Text(message)
+                .font(.caption2)
+                .foregroundStyle(.red)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        } else if track.status == .unavailable, let reason = track.unavailableReason {
+            Text(reason)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         } else if track.status == .downloading {
             ProgressView(value: track.progress)
                 .progressViewStyle(.linear)
@@ -179,7 +190,7 @@ struct TrackRow: View {
             case .cancelled:
                 Text("Cancelled")
             case .unavailable:
-                Text("Unavailable")
+                Text((track.unavailableKind ?? .removed).displayName)
                     .foregroundStyle(.secondary)
             case .pending, .fetchingMetadata:
                 Text("Queued")
@@ -193,6 +204,9 @@ struct TrackRow: View {
 
     private var leadingSymbolName: String {
         if track.isFileMissing { return "questionmark.folder" }
+        if track.status == .unavailable, let kind = track.unavailableKind {
+            return kind.symbolName
+        }
         // Still downloading → show download status. Done → show enrichment status.
         if track.status != .completed { return track.status.symbolName }
         return track.enrichmentStatus.symbolName

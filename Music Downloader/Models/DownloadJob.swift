@@ -24,6 +24,13 @@ final class DownloadJob: Identifiable {
     /// Surfaced as "N already in your library" rather than silently vanishing.
     var skippedVideoIDs: [String] = []
 
+    /// Audio files found in this playlist's folder that no track accounts for.
+    /// Populated by a folder refresh and deliberately not persisted — the
+    /// folder is the source of truth, so a stale list would be worse than none.
+    var discoveredFiles: [DiscoveredFile] = []
+    /// When the folder was last reconciled against disk.
+    var lastFolderScan: Date?
+
     init(
         id: UUID = UUID(),
         url: String,
@@ -80,6 +87,40 @@ final class DownloadJob: Identifiable {
     }
 
     var unavailableCount: Int { unavailableTracks.count }
+
+    /// Unavailable entries split by cause, since the two need different copy
+    /// and only one of them is worth retrying.
+    func unavailableTracks(of kind: UnavailableKind) -> [Track] {
+        unavailableTracks.filter { ($0.unavailableKind ?? .removed) == kind }
+    }
+
+    /// True when at least one entry failed the age gate — the case a retry
+    /// with browser cookies can actually fix.
+    var hasAgeRestrictedTracks: Bool {
+        unavailableTracks.contains { $0.unavailableKind == .ageRestricted }
+    }
+
+    /// Tracks whose file was expected on disk but isn't there any more.
+    var missingTracks: [Track] {
+        tracks.filter(\.isFileMissing)
+    }
+
+    /// The folder a refresh should reconcile against, or nil when this job has
+    /// no folder of its own.
+    ///
+    /// A merged library job's `folderURL` is the whole library root, shared
+    /// with every other playlist — scanning it would report every unrelated
+    /// library song as a new file, so those jobs get no folder sync.
+    var syncFolderURL: URL? {
+        if let stagingURL, status == .staged { return stagingURL }
+        return mode == .freshFolder ? folderURL : nil
+    }
+
+    /// Why folder sync is unavailable, for the disabled button's tooltip.
+    var folderSyncUnavailableReason: String? {
+        guard syncFolderURL == nil else { return nil }
+        return "This playlist lives in your library, which is shared with every other playlist. Refresh only works on a playlist that owns its folder."
+    }
 
     /// Average per-track progress, 0...1.
     var overallProgress: Double {

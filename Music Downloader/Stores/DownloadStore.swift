@@ -64,7 +64,8 @@ final class DownloadStore {
                 format: format,
                 root: settings.downloadRoot,
                 libraryRoot: settings.libraryRoot,
-                stagingRoot: settings.stagingRoot
+                stagingRoot: settings.stagingRoot,
+                cookiesFromBrowser: settings.cookiesFromBrowser
             )
         }
     }
@@ -95,6 +96,384 @@ final class DownloadStore {
     func revealTrackInFinder(_ track: Track) {
         guard let url = track.fileURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    // MARK: - Public actions: Song management
+
+    /// Drops a song from this playlist and leaves the file alone.
+    ///
+    /// The counterpart to `deleteTrack`: for a library song that belongs in
+    /// other playlists, or a file the user wants to keep and re-file by hand.
+    func removeTrack(_ track: Track, from job: DownloadJob) {
+        job.tracks.removeAll { $0 === track }
+        job.discoveredFiles.removeAll { $0.url == track.fileURL }
+        persist()
+    }
+
+    /// Drops several songs from a playlist in one pass.
+    func removeTracks(_ tracks: [Track], from job: DownloadJob) {
+        guard !tracks.isEmpty else { return }
+        let doomed = Set(tracks.map(ObjectIdentifier.init))
+        job.tracks.removeAll { doomed.contains(ObjectIdentifier($0)) }
+        persist()
+    }
+
+    /// Drops a song from the playlist *and* moves its file to the Trash,
+    /// unregistering it from the library if that's where it lived.
+    ///
+    /// Trash rather than unlink: a wrong click here costs a song the user may
+    /// have spent a download and an enrichment pass on, and the Finder already
+    /// has the undo affordance for it.
+    func deleteTrack(_ track: Track, from job: DownloadJob, settings: AppSettings) async {
+        if let fileURL = track.fileURL {
+            var trashed: NSURL?
+            try? FileManager.default.trashItem(at: fileURL, resultingItemURL: &trashed)
+
+            if isInside(fileURL, root: settings.libraryRoot) {
+                let ledger = ledger(for: settings.libraryRoot)
+                await ledger.remove(uid: track.songUID)
+                let entries = await ledger.allEntries()
+                try? ManifestWriter.write(
+                    songs: entries,
+                    libraryName: settings.libraryRoot.lastPathComponent,
+                    to: settings.libraryRoot
+                )
+                libraryRevision += 1
+            }
+        }
+        job.tracks.removeAll { $0 === track }
+        persist()
+    }
+
+    /// Fetches a track again from YouTube into this playlist's folder.
+    ///
+    /// For a song whose file was deleted behind the app's back, or one that
+    /// failed the first time. Previously-resolved metadata is re-applied so the
+    /// replacement lands with the same tags and filename it had before.
+    func redownloadTrack(_ track: Track, in job: DownloadJob, settings: AppSettings) {
+        guard let videoID = Self.videoID(for: track) else {
+            track.status = .failed
+            track.errorMessage = "This song has no YouTube video to fetch."
+            return
+        }
+        let destination = job.syncFolderURL ?? job.folderURL
+        let format = job.mode == .library ? settings.libraryFormat : settings.audioFormat
+
+        track.status = .pending
+        track.progress = 0
+        track.errorMessage = nil
+        track.unavailableReason = nil
+        track.unavailableKind = nil
+
+        Task { [weak self] in
+            guard let self else { return }
+            await self.fetchSingle(
+                track: track,
+                in: job,
+                videoID: videoID,
+                destination: destination,
+                format: format,
+                settings: settings
+            )
+            self.persist()
+        }
+    }
+
+    /// Downloads one pasted YouTube URL into this playlist's folder.
+    ///
+    /// - Returns: a message to show the user, or nil when the song simply
+    ///   started downloading and the row speaks for itself.
+    @discardableResult
+    func addSong(url: String, to job: DownloadJob, settings: AppSettings) async -> String? {
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "Paste a YouTube link first." }
+
+        let metadata: PlaylistMetadata
+        do {
+            metadata = try await service.fetchMetadata(
+                url: trimmed,
+                cookiesFromBrowser: settings.cookiesFromBrowser,
+                singleVideo: true
+            )
+        } catch {
+            return error.localizedDescription
+        }
+
+        // With --no-playlist this is a single video, so the top level describes
+        // it. A URL that still resolves to a list means the link points at a
+        // playlist proper, which is a different feature.
+        guard let videoID = metadata.id, metadata.entries == nil else {
+            return "That link is a playlist. Use New Download for a whole playlist."
+        }
+        guard !job.tracks.contains(where: { Self.videoID(for: $0) == videoID }) else {
+            return "That song is already in this playlist."
+        }
+
+        let title = metadata.title ?? videoID
+        let track = Track(id: videoID, title: title)
+        job.tracks.append(track)
+
+        // Already in the library: point at the copy that exists rather than
+        // downloading a second one. Same rule the playlist pipeline follows.
+        if job.mode == .library,
+           let existing = await ledger(for: settings.libraryRoot)
+               .allEntries()
+               .first(where: { $0.sourceVideoID == videoID }) {
+            track.songUID = existing.uid
+            track.fileURL = settings.libraryRoot.appendingPathComponent(existing.file)
+            track.metadata = Self.metadata(from: existing, fallbackTitle: title)
+            track.sourceDuration = existing.durationSeconds
+            track.status = .completed
+            track.progress = 1
+            track.enrichmentStatus = .enriched
+            persist()
+            return "\(existing.name) was already in your library — added to this playlist."
+        }
+
+        let destination = job.syncFolderURL ?? job.folderURL
+        let format = job.mode == .library ? settings.libraryFormat : settings.audioFormat
+        await fetchSingle(
+            track: track,
+            in: job,
+            videoID: videoID,
+            destination: destination,
+            format: format,
+            settings: settings
+        )
+        persist()
+
+        if track.status == .completed { return nil }
+        return track.errorMessage ?? track.unavailableReason
+    }
+
+    /// Takes ownership of a file already sitting in the playlist folder.
+    ///
+    /// Files arrive in these folders by hand as well as by download. Adopting
+    /// one keeps whatever tags it already carries — including a `SONG_UID`
+    /// written by an earlier run of this app, so a song that wandered out and
+    /// back rejoins under its original identity.
+    func adoptDiscoveredFile(
+        _ file: DiscoveredFile,
+        into job: DownloadJob,
+        settings: AppSettings
+    ) async {
+        guard !job.tracks.contains(where: { $0.fileURL?.standardizedFileURL == file.url.standardizedFileURL })
+        else {
+            job.discoveredFiles.removeAll { $0.id == file.id }
+            return
+        }
+
+        let trackID = file.sourceVideoID
+            ?? SongUID.parse(file.songUID)?.videoID
+            ?? "local-\(UUID().uuidString.prefix(11))"
+        let track = Track(id: trackID, title: file.title, songUID: file.songUID)
+        track.status = .completed
+        track.progress = 1
+        track.fileURL = file.url
+        track.originalFilename = file.url.deletingPathExtension().lastPathComponent
+        track.sourceDuration = file.durationSeconds
+        if file.artist != nil || file.album != nil {
+            track.metadata = SongMetadata(
+                title: file.title,
+                artist: file.artist ?? "",
+                album: file.album,
+                year: nil,
+                coverArtURL: nil,
+                geniusID: nil,
+                geniusURL: nil,
+                genre: nil,
+                comments: nil,
+                songDescription: nil,
+                annotations: nil,
+                featuredArtists: nil,
+                producerArtists: nil,
+                writerArtists: nil,
+                credits: nil,
+                recordingLocation: nil,
+                language: nil,
+                releaseDate: nil,
+                mediaLinks: nil,
+                songRelationships: nil
+            )
+        }
+        // A file carrying our own UID was tagged by this app; anything else
+        // still deserves an enrichment pass.
+        track.enrichmentStatus = file.songUID != nil ? .enriched : .notStarted
+
+        job.tracks.append(track)
+        job.discoveredFiles.removeAll { $0.id == file.id }
+
+        await syncLibraryRecordIfNeeded(
+            for: track,
+            libraryRoot: settings.libraryRoot,
+            preserveExportStamp: false
+        )
+        persist()
+    }
+
+    /// Reconciles the playlist folder on disk against the job's track list.
+    ///
+    /// Two things fall out of it: files the user added by hand, offered for
+    /// adoption, and tracks whose file moved or vanished. A track that matches
+    /// a found file by `SONG_UID` is relinked silently — a rename in Finder is
+    /// not a missing song plus a new one.
+    func refreshFolder(job: DownloadJob, settings: AppSettings) async {
+        guard let folder = job.syncFolderURL else {
+            job.discoveredFiles = []
+            job.lastFolderScan = .now
+            return
+        }
+
+        let known = Set(job.tracks.compactMap { $0.fileURL?.path })
+        var found = await FolderScanner.scan(folder: folder, knownPaths: known)
+
+        // Relink renamed files before reporting anything.
+        for track in job.tracks where track.isFileMissing {
+            guard let index = found.firstIndex(where: { candidate in
+                if let uid = candidate.songUID { return uid == track.songUID }
+                if let videoID = candidate.sourceVideoID { return videoID == Self.videoID(for: track) }
+                return false
+            }) else { continue }
+            track.fileURL = found[index].url
+            track.status = .completed
+            track.progress = 1
+            found.remove(at: index)
+        }
+
+        job.discoveredFiles = found
+        job.lastFolderScan = .now
+        persist()
+    }
+
+    // MARK: - Single-track download
+
+    /// Runs yt-dlp for one video and applies the result to one track.
+    ///
+    /// Deliberately separate from `execute`: a per-track fetch must not touch
+    /// the job's status or its process slot, or re-downloading one song would
+    /// look like the whole playlist restarted.
+    private func fetchSingle(
+        track: Track,
+        in job: DownloadJob,
+        videoID: String,
+        destination: URL,
+        format: String,
+        settings: AppSettings
+    ) async {
+        try? FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        track.status = .downloading
+        track.progress = 0
+
+        var sawFile = false
+        for await event in await service.download(
+            url: "https://www.youtube.com/watch?v=\(videoID)",
+            outputDir: destination,
+            format: format,
+            // A private slot, so cancelling the parent job doesn't kill this
+            // and vice versa.
+            jobID: UUID(),
+            archiveURL: nil,
+            cookiesFromBrowser: settings.cookiesFromBrowser,
+            singleVideo: true
+        ) {
+            switch event {
+            case .trackStarted(_, let title, _):
+                if track.title.isEmpty || track.title == track.id { track.title = title }
+
+            case .trackProgress(_, let fraction):
+                track.progress = fraction
+
+            case .trackFinished(_, let path):
+                Self.markDownloaded(track, at: path)
+                sawFile = true
+
+            case .trackUnavailable(_, let reason, let kind):
+                track.status = .unavailable
+                track.unavailableReason = reason
+                track.unavailableKind = kind
+                track.progress = 0
+
+            case .failed(let message):
+                track.status = .failed
+                track.errorMessage = message
+
+            case .finished, .logLine:
+                break
+            }
+        }
+
+        if !sawFile {
+            if track.status == .downloading {
+                track.status = .failed
+                track.errorMessage = track.errorMessage ?? "yt-dlp produced no file."
+            }
+            return
+        }
+
+        // Re-apply what we already knew about the song so a replacement file
+        // comes back with the tags and filename it had; otherwise take a fresh
+        // enrichment pass if the user has a token for one.
+        let token = settings.geniusToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let metadata = track.metadata {
+            let coverData: Data?
+            if let coverURL = metadata.coverArtURL, !token.isEmpty {
+                coverData = try? await genius.fetchCoverArt(url: coverURL)
+            } else {
+                coverData = nil
+            }
+            await writeMetadata(
+                metadata,
+                to: track,
+                in: job,
+                coverArtData: coverData,
+                template: settings.renameTemplate,
+                libraryRoot: settings.libraryRoot
+            )
+        } else if !token.isEmpty {
+            await enrichOne(
+                track: track,
+                in: job,
+                token: token,
+                template: settings.renameTemplate,
+                stripNoise: settings.stripSearchNoise,
+                libraryRoot: settings.libraryRoot
+            )
+        } else {
+            await syncLibraryRecordIfNeeded(
+                for: track,
+                libraryRoot: settings.libraryRoot,
+                preserveExportStamp: false
+            )
+        }
+    }
+
+    /// The YouTube video this track came from, preferring the UID (which
+    /// survives an id that was synthesized for a single-video job).
+    private static func videoID(for track: Track) -> String? {
+        if let fromUID = SongUID.parse(track.songUID)?.videoID { return fromUID }
+        return isPlausibleVideoID(track.id) ? track.id : nil
+    }
+
+    private static func isPlausibleVideoID(_ id: String) -> Bool {
+        id.count == 11 && id.allSatisfy {
+            ($0.isLetter || $0.isNumber) && $0.isASCII || $0 == "_" || $0 == "-"
+        }
+    }
+
+    /// Common bookkeeping for "a file just landed on disk for this track".
+    private static func markDownloaded(_ track: Track, at path: String) {
+        track.status = .completed
+        track.progress = 1
+        track.errorMessage = nil
+        track.unavailableReason = nil
+        track.unavailableKind = nil
+        track.fileURL = URL(fileURLWithPath: path)
+        // Remember original yt-dlp filename so "Revert" works post-rename.
+        if track.originalFilename == nil {
+            track.originalFilename = URL(fileURLWithPath: path)
+                .deletingPathExtension()
+                .lastPathComponent
+        }
     }
 
     /// Backfills skipped playlist rows from the library ledger. This repairs
@@ -219,53 +598,74 @@ final class DownloadStore {
     ) {
         let template = settings.renameTemplate
         Task { [weak self] in
-            guard let self, let currentURL = track.fileURL else { return }
-
-            // Capture original filename on first edit for revert support.
-            if track.originalFilename == nil {
-                track.originalFilename = currentURL.deletingPathExtension().lastPathComponent
-            }
-
-            track.enrichmentStatus = .writing
-
-            do {
-                try await writer.write(
-                    metadata: metadata,
-                    coverArtData: coverArtData,
-                    songUID: track.songUID,
-                    sourceVideoID: SongUID.parse(track.songUID)?.videoID,
-                    to: currentURL
-                )
-                track.metadata = metadata
-
-                // Rename according to template if title or artist are set.
-                if !metadata.title.isEmpty, !metadata.artist.isEmpty {
-                    let index = (job.tracks.firstIndex(where: { $0.id == track.id }) ?? 0) + 1
-                    let renderedBase = FilenameTemplate.render(
-                        template: template,
-                        metadata: metadata,
-                        trackNumber: index,
-                        originalName: track.originalFilename ?? currentURL.deletingPathExtension().lastPathComponent
-                    )
-                    let ext = currentURL.pathExtension
-                    var newURL = currentURL.deletingLastPathComponent()
-                        .appendingPathComponent(renderedBase)
-                        .appendingPathExtension(ext)
-
-                    if newURL != currentURL {
-                        newURL = Self.uniqueDestination(for: newURL, current: currentURL)
-                        try FileManager.default.moveItem(at: currentURL, to: newURL)
-                        track.fileURL = newURL
-                    }
-                }
-
-                track.enrichmentStatus = .enriched
-                await syncLibraryRecordIfNeeded(for: track, in: job, libraryRoot: settings.libraryRoot)
-            } catch {
-                track.enrichmentStatus = .failed(error.localizedDescription)
-            }
-
+            guard let self else { return }
+            await self.writeMetadata(
+                metadata,
+                to: track,
+                in: job,
+                coverArtData: coverArtData,
+                template: template,
+                libraryRoot: settings.libraryRoot
+            )
             self.persist()
+        }
+    }
+
+    /// Writes tags to a track's file, renames it per the template, and syncs
+    /// the library record. Shared by manual edits and by re-downloads, which
+    /// need the file to come back wearing the metadata it already had.
+    private func writeMetadata(
+        _ metadata: SongMetadata,
+        to track: Track,
+        in job: DownloadJob,
+        coverArtData: Data?,
+        template: String,
+        libraryRoot: URL
+    ) async {
+        guard let currentURL = track.fileURL else { return }
+
+        // Capture original filename on first edit for revert support.
+        if track.originalFilename == nil {
+            track.originalFilename = currentURL.deletingPathExtension().lastPathComponent
+        }
+
+        track.enrichmentStatus = .writing
+
+        do {
+            try await writer.write(
+                metadata: metadata,
+                coverArtData: coverArtData,
+                songUID: track.songUID,
+                sourceVideoID: SongUID.parse(track.songUID)?.videoID,
+                to: currentURL
+            )
+            track.metadata = metadata
+
+            // Rename according to template if title or artist are set.
+            if !metadata.title.isEmpty, !metadata.artist.isEmpty {
+                let index = (job.tracks.firstIndex(where: { $0.id == track.id }) ?? 0) + 1
+                let renderedBase = FilenameTemplate.render(
+                    template: template,
+                    metadata: metadata,
+                    trackNumber: index,
+                    originalName: track.originalFilename ?? currentURL.deletingPathExtension().lastPathComponent
+                )
+                let ext = currentURL.pathExtension
+                var newURL = currentURL.deletingLastPathComponent()
+                    .appendingPathComponent(renderedBase)
+                    .appendingPathExtension(ext)
+
+                if newURL != currentURL {
+                    newURL = Self.uniqueDestination(for: newURL, current: currentURL)
+                    try FileManager.default.moveItem(at: currentURL, to: newURL)
+                    track.fileURL = newURL
+                }
+            }
+
+            track.enrichmentStatus = .enriched
+            await syncLibraryRecordIfNeeded(for: track, in: job, libraryRoot: libraryRoot)
+        } catch {
+            track.enrichmentStatus = .failed(error.localizedDescription)
         }
     }
 
@@ -331,11 +731,15 @@ final class DownloadStore {
         format: String,
         root: URL,
         libraryRoot: URL,
-        stagingRoot: URL
+        stagingRoot: URL,
+        cookiesFromBrowser: String?
     ) async {
         job.status = .fetchingMetadata
         do {
-            let metadata = try await service.fetchMetadata(url: job.url)
+            let metadata = try await service.fetchMetadata(
+                url: job.url,
+                cookiesFromBrowser: cookiesFromBrowser
+            )
             let playlistTitle = metadata.title
                 ?? metadata.entries?.first?.title
                 ?? "Untitled"
@@ -428,7 +832,8 @@ final class DownloadStore {
                 outputDir: folder,
                 format: format,
                 jobID: job.id,
-                archiveURL: archiveURL
+                archiveURL: archiveURL,
+                cookiesFromBrowser: cookiesFromBrowser
             ) {
                 apply(event, to: job)
             }
@@ -649,21 +1054,14 @@ final class DownloadStore {
             let target = job.tracks.first(where: { $0.id == id })
                 ?? (job.tracks.count == 1 ? job.tracks.first : nil)
             if let target {
-                target.status = .completed
-                target.progress = 1
-                target.fileURL = URL(fileURLWithPath: path)
-                // Remember original yt-dlp filename so "Revert" works post-rename.
-                if target.originalFilename == nil {
-                    target.originalFilename = URL(fileURLWithPath: path)
-                        .deletingPathExtension()
-                        .lastPathComponent
-                }
+                Self.markDownloaded(target, at: path)
             }
 
-        case .trackUnavailable(let id, let reason):
+        case .trackUnavailable(let id, let reason, let kind):
             if let track = job.tracks.first(where: { $0.id == id }) {
                 track.status = .unavailable
                 track.unavailableReason = reason
+                track.unavailableKind = kind
                 track.progress = 0
             }
 
@@ -904,6 +1302,8 @@ final class DownloadStore {
         let sourceDuration: Double?
         /// Optional so pre-existing jobs.json files still decode.
         let unavailableReason: String?
+        let unavailableKind: UnavailableKind?
+        let errorMessage: String?
     }
 
     private func persist() {
@@ -944,7 +1344,9 @@ final class DownloadStore {
                         alternativeMatches: track.alternativeMatches,
                         songUID: track.songUID,
                         sourceDuration: track.sourceDuration,
-                        unavailableReason: track.unavailableReason
+                        unavailableReason: track.unavailableReason,
+                        unavailableKind: track.unavailableKind,
+                        errorMessage: track.errorMessage
                     )
                 },
                 mode: job.mode,
@@ -982,6 +1384,11 @@ final class DownloadStore {
                     t.alternativeMatches = ts.alternativeMatches ?? []
                     t.sourceDuration = ts.sourceDuration
                     t.unavailableReason = ts.unavailableReason
+                    // Entries recorded before the age gate was told apart from
+                    // deletion all had the one meaning.
+                    t.unavailableKind = ts.unavailableKind
+                        ?? (ts.status == .unavailable ? .removed : nil)
+                    t.errorMessage = ts.errorMessage
                     return t
                 },
                 status: snap.status,

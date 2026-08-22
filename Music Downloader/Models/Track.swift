@@ -15,6 +15,13 @@ final class Track: Identifiable {
     /// Why YouTube refused to serve this video, when `status == .unavailable`.
     /// yt-dlp's own wording, e.g. "Video unavailable" or "Private video".
     var unavailableReason: String?
+    /// Whether the video is gone for good or merely age-gated. Drives whether
+    /// the UI offers a retry.
+    var unavailableKind: UnavailableKind?
+    /// Why the last download attempt failed, when `status == .failed`. Only
+    /// set for per-track downloads (re-download, one-off add) — a whole-job
+    /// failure is reported on the job.
+    var errorMessage: String?
 
     // Metadata enrichment (Phase 2)
     /// Original filename (without extension) as yt-dlp wrote it. Captured on

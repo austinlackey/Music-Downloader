@@ -93,6 +93,22 @@ private struct LibrarySettingsTab: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            Section("Age-Restricted Videos") {
+                Picker("Browser cookies", selection: $settings.cookieBrowser) {
+                    ForEach(AppSettings.cookieBrowsers, id: \.self) { browser in
+                        Text(browser.isEmpty ? "Don't use cookies" : browser.capitalized)
+                            .tag(browser)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                Text(settings.cookiesFromBrowser == nil
+                     ? "YouTube refuses age-restricted videos to signed-out requests. Pick a browser you're signed in to and yt-dlp will borrow its YouTube cookies for downloads."
+                     : "Downloads will use your \(settings.cookieBrowser.capitalized) YouTube session. Stay signed in there, or age-restricted songs will start failing again.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
     }

@@ -29,6 +29,9 @@ struct JobDetailView: View {
     @State private var folderMissing = false
     @State private var missingFileCount = 0
     @State private var showingUnavailable = false
+    @State private var showingAddSong = false
+    @State private var isRefreshing = false
+    @State private var trackPendingDelete: Track?
     @State private var searchText = ""
     @State private var sortField: TrackSortField = .number
     @State private var sortDirection: SortDirection = .ascending
@@ -50,7 +53,7 @@ struct JobDetailView: View {
                     .padding(.top, 12)
             }
 
-            if job.tracks.isEmpty {
+            if job.tracks.isEmpty && job.discoveredFiles.isEmpty {
                 ContentUnavailableView(
                     "Loading tracks…",
                     systemImage: "magnifyingglass",
@@ -59,6 +62,20 @@ struct JobDetailView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
+                    // Found-on-disk files sit above the playlist rather than
+                    // behind a disclosure: the whole point is that the user
+                    // sees them and decides, and a row they have to go looking
+                    // for is a row they won't act on.
+                    if !job.discoveredFiles.isEmpty {
+                        Section {
+                            ForEach(job.discoveredFiles) { file in
+                                discoveredRow(file)
+                            }
+                        } header: {
+                            discoveredHeader
+                        }
+                    }
+
                     Section {
                         ForEach(sortedFilteredTracks, id: \.element.id) { idx, track in
                             TrackRow(track: track, index: idx + 1)
@@ -68,16 +85,7 @@ struct JobDetailView: View {
                                         inspectedTrack = track
                                     }
                                 }
-                                .contextMenu {
-                                    if track.fileURL != nil {
-                                        Button("Inspect & Re-match…") {
-                                            inspectedTrack = track
-                                        }
-                                        Button("Show in Finder") {
-                                            store.revealTrackInFinder(track)
-                                        }
-                                    }
-                                }
+                                .contextMenu { trackMenu(track) }
                         }
                     } header: {
                         columnHeader
@@ -91,6 +99,28 @@ struct JobDetailView: View {
         .navigationTitle(job.playlistTitle)
         .navigationSubtitle(job.status.displayName)
         .toolbar {
+            ToolbarItem(placement: .automatic) {
+                if !job.isActive {
+                    Button {
+                        showingAddSong = true
+                    } label: {
+                        Label("Add Song", systemImage: "plus.circle")
+                    }
+                    .help("Paste a YouTube link to add one song to this playlist")
+                }
+            }
+            ToolbarItem(placement: .automatic) {
+                if !job.isActive {
+                    Button {
+                        refreshFolder()
+                    } label: {
+                        Label("Refresh Folder", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(job.syncFolderURL == nil || isRefreshing)
+                    .help(job.folderSyncUnavailableReason
+                          ?? "Check the folder for songs added or removed outside the app")
+                }
+            }
             ToolbarItem(placement: .automatic) {
                 if !job.isActive && hasEnrichedTracks {
                     Button {
@@ -153,6 +183,28 @@ struct JobDetailView: View {
         .sheet(isPresented: $showingMergeReview) {
             MergeReviewView(job: job)
         }
+        .sheet(isPresented: $showingAddSong) {
+            AddSongSheet(job: job)
+        }
+        .alert(
+            "Move to Trash?",
+            isPresented: Binding(
+                get: { trackPendingDelete != nil },
+                set: { if !$0 { trackPendingDelete = nil } }
+            ),
+            presenting: trackPendingDelete
+        ) { track in
+            Button("Move to Trash", role: .destructive) {
+                trackPendingDelete = nil
+                Task {
+                    await store.deleteTrack(track, from: job, settings: settings)
+                    validatePaths()
+                }
+            }
+            Button("Cancel", role: .cancel) { trackPendingDelete = nil }
+        } message: { track in
+            Text(deleteConfirmationMessage(for: track))
+        }
         .sheet(isPresented: $showingSongList) {
             PlaylistTextExportSheet(job: job)
         }
@@ -190,9 +242,15 @@ struct JobDetailView: View {
                 await store.hydrateLibraryReferences(job: job, settings: settings)
                 validatePaths()
             }
+            // Songs get added to and removed from these folders in Finder, so
+            // opening the playlist is exactly when we should look.
+            refreshFolder()
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { validatePaths() }
+            if phase == .active {
+                validatePaths()
+                refreshFolder()
+            }
         }
     }
 
@@ -292,6 +350,65 @@ struct JobDetailView: View {
         missingFileCount = job.tracks.filter(\.isFileMissing).count
     }
 
+    /// Reconciles the folder against the track list, then re-derives the
+    /// banners from what the scan found.
+    private func refreshFolder() {
+        // A download in flight is *supposed* to be putting new files in this
+        // folder; reporting its own output as an unexpected find would be
+        // noise at best.
+        guard !isRefreshing, !job.isActive else { return }
+        isRefreshing = true
+        Task {
+            await store.refreshFolder(job: job, settings: settings)
+            validatePaths()
+            isRefreshing = false
+        }
+    }
+
+    // MARK: - Per-song menu
+
+    /// The right-click menu on a song row.
+    ///
+    /// Splits the two ways of getting rid of a song, because they are not the
+    /// same decision: leaving a playlist is cheap and reversible, and losing
+    /// the file is neither.
+    @ViewBuilder
+    private func trackMenu(_ track: Track) -> some View {
+        if track.fileURL != nil, !track.isFileMissing {
+            Button("Inspect & Re-match…") { inspectedTrack = track }
+            Button("Show in Finder") { store.revealTrackInFinder(track) }
+            Divider()
+        }
+
+        if track.isFileMissing || track.status == .failed || track.status == .unavailable {
+            Button("Download Again") {
+                store.redownloadTrack(track, in: job, settings: settings)
+            }
+            Divider()
+        }
+
+        Button("Remove from Playlist") {
+            store.removeTrack(track, from: job)
+            validatePaths()
+        }
+        if track.fileURL != nil, !track.isFileMissing {
+            Button("Move File to Trash…", role: .destructive) {
+                trackPendingDelete = track
+            }
+        }
+    }
+
+    private func deleteConfirmationMessage(for track: Track) -> String {
+        let name = track.metadata?.title ?? track.title
+        let inLibrary = track.fileURL.map {
+            $0.standardizedFileURL.path.hasPrefix(settings.libraryRoot.standardizedFileURL.path + "/")
+        } ?? false
+        if inLibrary {
+            return "“\(name)” moves to the Trash and leaves your library and this playlist. Other playlists that use it will show it as missing."
+        }
+        return "“\(name)” moves to the Trash and leaves this playlist."
+    }
+
     // MARK: - Missing banners
 
     private var missingFolderBanner: some View {
@@ -311,16 +428,126 @@ struct JobDetailView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// Songs the playlist still lists but whose files are gone from the folder.
+    ///
+    /// Offers both ways out — fetch them again, or accept the deletion and
+    /// drop them from the playlist — because either can be what the user meant
+    /// when they moved the file.
     private var missingFilesBanner: some View {
-        Label(
-            "\(missingFileCount) file\(missingFileCount == 1 ? "" : "s") missing from disk",
-            systemImage: "exclamationmark.triangle"
-        )
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle")
+            Text("\(missingFileCount) song\(missingFileCount == 1 ? "" : "s") missing from the folder")
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Button("Download Again") {
+                for track in job.missingTracks {
+                    store.redownloadTrack(track, in: job, settings: settings)
+                }
+                validatePaths()
+            }
+            .controlSize(.small)
+            Button("Remove from Playlist", role: .destructive) {
+                store.removeTracks(job.missingTracks, from: job)
+                validatePaths()
+            }
+            .controlSize(.small)
+        }
         .font(.caption)
         .foregroundStyle(.orange)
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// Header for the found-on-disk section, with the bulk action.
+    private var discoveredHeader: some View {
+        let count = job.discoveredFiles.count
+        return HStack(spacing: 8) {
+            Image(systemName: "tray.and.arrow.down")
+            Text("\(count) new file\(count == 1 ? "" : "s") in this folder")
+                .fontWeight(.semibold)
+            Text("— not in the playlist yet. Adding one keeps the tags it already has.")
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Button("Add All") {
+                addAllDiscovered()
+            }
+            .controlSize(.small)
+            Button("Ignore") {
+                job.discoveredFiles = []
+            }
+            .controlSize(.small)
+            .help("Hide these until the next refresh")
+        }
+        .font(.caption)
+        .foregroundStyle(.blue)
+    }
+
+    /// One found-on-disk file, laid out to line up with the song rows below it.
+    private func discoveredRow(_ file: DiscoveredFile) -> some View {
+        HStack(spacing: 0) {
+            Image(systemName: "doc.badge.plus")
+                .foregroundStyle(.blue)
+                .frame(width: 60, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(file.title)
+                    .lineLimit(1)
+                Text(file.displayName)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.trailing, 8)
+
+            Text(file.artist ?? "—")
+                .font(.subheadline)
+                .foregroundStyle(file.artist != nil ? .primary : .secondary)
+                .lineLimit(1)
+                .frame(width: 140, alignment: .leading)
+                .padding(.trailing, 8)
+
+            Text(file.album ?? "—")
+                .font(.subheadline)
+                .foregroundStyle(file.album != nil ? .primary : .secondary)
+                .lineLimit(1)
+                .frame(width: 140, alignment: .leading)
+                .padding(.trailing, 8)
+
+            Button("Add") {
+                Task {
+                    await store.adoptDiscoveredFile(file, into: job, settings: settings)
+                    validatePaths()
+                }
+            }
+            .controlSize(.small)
+            .frame(width: 98, alignment: .leading)
+        }
+        .padding(.vertical, 4)
+        .contextMenu {
+            Button("Add to Playlist") {
+                Task {
+                    await store.adoptDiscoveredFile(file, into: job, settings: settings)
+                    validatePaths()
+                }
+            }
+            Button("Show in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([file.url])
+            }
+        }
+    }
+
+    private func addAllDiscovered() {
+        let files = job.discoveredFiles
+        Task {
+            for file in files {
+                await store.adoptDiscoveredFile(file, into: job, settings: settings)
+            }
+            validatePaths()
+        }
     }
 
     private var trackSummary: String {
@@ -457,67 +684,118 @@ struct JobDetailView: View {
     /// column's ideal width wide enough to collapse the sidebar.
     private var unavailableBanner: some View {
         let count = job.unavailableCount
-        return Button {
-            showingUnavailable = true
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "eye.slash")
-                Text("\(count) song\(count == 1 ? "" : "s") no longer available on YouTube")
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                Text("View")
-                    .fontWeight(.semibold)
-                Image(systemName: "chevron.right")
-                    .imageScale(.small)
+        let ageRestricted = job.unavailableTracks(of: .ageRestricted)
+        return HStack(spacing: 8) {
+            Image(systemName: job.hasAgeRestrictedTracks
+                  ? "person.crop.circle.badge.exclamationmark"
+                  : "eye.slash")
+            Text("\(count) song\(count == 1 ? "" : "s") YouTube wouldn't serve")
+                .lineLimit(1)
+
+            Button {
+                showingUnavailable = true
+            } label: {
+                HStack(spacing: 2) {
+                    Text("Details")
+                    Image(systemName: "chevron.right").imageScale(.small)
+                }
+                .fontWeight(.semibold)
             }
-            .font(.caption)
-            .foregroundStyle(.orange)
-            .padding(8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-            .contentShape(RoundedRectangle(cornerRadius: 8))
+            .buttonStyle(.plain)
+            .popover(isPresented: $showingUnavailable, arrowEdge: .bottom) {
+                unavailableList
+            }
+
+            Spacer(minLength: 8)
+
+            // The age gate is the one cause a retry can clear, so it gets its
+            // own button rather than being lumped in with the dead videos.
+            if !ageRestricted.isEmpty {
+                Button(settings.cookiesFromBrowser == nil
+                       ? "Retry (needs cookies)"
+                       : "Retry \(ageRestricted.count) Age-Restricted") {
+                    for track in ageRestricted {
+                        store.redownloadTrack(track, in: job, settings: settings)
+                    }
+                }
+                .controlSize(.small)
+                .disabled(settings.cookiesFromBrowser == nil)
+                .help(settings.cookiesFromBrowser == nil
+                      ? "Turn on browser cookies in Settings (⌘,) so YouTube will serve these"
+                      : "Fetch these again using your \(settings.cookieBrowser.capitalized) YouTube session")
+            }
+
+            Button("Remove from Playlist", role: .destructive) {
+                store.removeTracks(job.unavailableTracks, from: job)
+            }
+            .controlSize(.small)
+            .help("Drop these entries from the playlist for good")
         }
-        .buttonStyle(.plain)
-        .popover(isPresented: $showingUnavailable, arrowEdge: .bottom) {
-            unavailableList
-        }
+        .font(.caption)
+        .foregroundStyle(.orange)
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
     }
 
     /// Fixed width so long titles wrap inside the popover instead of widening
     /// it, and a capped scroll height so a badly rotted playlist stays usable.
     private var unavailableList: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(UnavailableKind.allCases, id: \.self) { kind in
+                    let tracks = job.unavailableTracks(of: kind)
+                    if !tracks.isEmpty {
+                        unavailableSection(kind: kind, tracks: tracks)
+                    }
+                }
+            }
+            .padding(14)
+        }
+        .frame(width: 360, height: 320)
+    }
+
+    /// One cause, its explanation, and the songs it accounts for.
+    ///
+    /// Read-only: the actions live on the banner, where a click is one step
+    /// away rather than two.
+    @ViewBuilder
+    private func unavailableSection(kind: UnavailableKind, tracks: [Track]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("No longer on YouTube")
-                .font(.headline)
-            Text("These were in the playlist but have since been deleted, made private, or blocked. They aren't counted in the totals.")
+            HStack(spacing: 6) {
+                Image(systemName: kind.symbolName)
+                Text(kind.groupTitle)
+                    .font(.headline)
+                Spacer()
+                Text("\(tracks.count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            Text(kind.groupExplanation)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             Divider()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 7) {
-                    ForEach(job.unavailableTracks) { track in
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(track.title.isEmpty ? track.id : track.title)
-                                .font(.caption)
-                                .lineLimit(2)
-                                .fixedSize(horizontal: false, vertical: true)
-                            if let reason = track.unavailableReason {
-                                Text(reason)
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                            }
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(tracks) { track in
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(track.title.isEmpty ? track.id : track.title)
+                            .font(.caption)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let reason = track.unavailableReason {
+                            Text(reason)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            .frame(maxHeight: 220)
         }
-        .padding(14)
-        .frame(width: 330)
     }
 
     private var statusBadge: some View {

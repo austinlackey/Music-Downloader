@@ -15,6 +15,7 @@ final class AppSettings {
     private static let exportRootKey      = "exportRoot"
     private static let defaultDownloadModeKey = "defaultDownloadMode"
     private static let libraryFormatKey   = "libraryFormat"
+    private static let cookieBrowserKey   = "cookieBrowser"
 
     var downloadRoot: URL {
         didSet {
@@ -77,6 +78,22 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(audioFormat, forKey: Self.audioFormatKey) }
     }
 
+    /// Browser whose YouTube cookies yt-dlp should borrow, or empty for none.
+    ///
+    /// The only way past YouTube's age gate. Off by default because reading a
+    /// browser's cookie jar is a real (if local) privacy cost, and most
+    /// playlists never need it.
+    var cookieBrowser: String {
+        didSet { UserDefaults.standard.set(cookieBrowser, forKey: Self.cookieBrowserKey) }
+    }
+
+    /// What to hand `YTDLPService`: nil rather than an empty string, so the
+    /// flag is omitted entirely when the user hasn't opted in.
+    var cookiesFromBrowser: String? {
+        let trimmed = cookieBrowser.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     // MARK: - Phase 2: Genius enrichment
 
     /// Client Access Token from https://genius.com/api-clients.
@@ -129,6 +146,7 @@ final class AppSettings {
         self.defaultDownloadMode = defaults.string(forKey: Self.defaultDownloadModeKey)
             .flatMap(DownloadMode.init(rawValue:)) ?? .library
         self.libraryFormat = defaults.string(forKey: Self.libraryFormatKey) ?? "mp3"
+        self.cookieBrowser = defaults.string(forKey: Self.cookieBrowserKey) ?? ""
 
         for directory in [self.downloadRoot, self.libraryRoot, self.stagingRoot, self.exportRoot] {
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -141,6 +159,12 @@ final class AppSettings {
     }
 
     static let supportedFormats: [String] = ["mp3", "m4a", "flac", "wav", "opus"]
+
+    /// Browsers yt-dlp can read cookies from on macOS, in the order most
+    /// people are likely to have them. Empty string is the "don't" option.
+    static let cookieBrowsers: [String] = [
+        "", "safari", "chrome", "brave", "edge", "firefox", "chromium", "opera", "vivaldi",
+    ]
 
     /// Formats BingoBite's `AudioTagReader` can parse and `AVAudioPlayer` can
     /// play on iPad. Opus is excluded on both counts.
