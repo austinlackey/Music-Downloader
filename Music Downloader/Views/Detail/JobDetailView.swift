@@ -664,6 +664,10 @@ struct JobDetailView: View {
                 unavailableBanner
             }
 
+            if !job.isActive, job.failedCount > 0 {
+                failedBanner
+            }
+
             if let failure = job.failureKind, job.status == .failed {
                 outdatedDownloaderBanner(failure)
             } else if let error = job.errorMessage, job.status == .failed {
@@ -708,6 +712,46 @@ struct JobDetailView: View {
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// Songs the download choked on. Separate from `unavailableBanner`
+    /// because the fix is different: these videos still exist, so fetching
+    /// them again is the first thing to try.
+    ///
+    /// Both buttons clear the run's failed badge once nothing is left failing
+    /// — the whole point of offering them here rather than one row at a time.
+    ///
+    /// One line, for the reason the banners around it are: `header` has no
+    /// scroll view, so a banner that wraps pushes the track list off-screen.
+    private var failedBanner: some View {
+        let failed = job.failedTracks
+        return HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+            Text("\(failed.count) song\(failed.count == 1 ? "" : "s") didn't download")
+                .lineLimit(1)
+
+            Spacer(minLength: 8)
+
+            Button("Download Again") {
+                for track in failed {
+                    store.redownloadTrack(track, in: job, settings: settings)
+                }
+            }
+            .controlSize(.small)
+            .help("Try these songs again")
+
+            Button("Remove from Playlist", role: .destructive) {
+                store.removeTracks(failed, from: job)
+                validatePaths()
+            }
+            .controlSize(.small)
+            .help("Drop these entries so the playlist reflects what you actually have")
+        }
+        .font(.caption)
+        .foregroundStyle(.red)
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
     }
 
     /// Playlists outlive their videos. State that plainly instead of leaving

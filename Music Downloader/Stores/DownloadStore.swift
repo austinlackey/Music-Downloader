@@ -100,6 +100,23 @@ final class DownloadStore {
 
     // MARK: - Public actions: Song management
 
+    /// Applies `DownloadJob.revisedVerdict`, so a playlist stops claiming a
+    /// failure whose songs the user has since removed or re-fetched.
+    ///
+    /// Called from every edit that can change a settled run's outcome; the
+    /// job itself decides whether the outcome actually moved.
+    @discardableResult
+    private func refreshVerdict(of job: DownloadJob) -> Bool {
+        guard let verdict = job.revisedVerdict else { return false }
+        job.status = verdict
+        if verdict != .failed {
+            // The old diagnosis described songs that are no longer here.
+            job.errorMessage = nil
+            job.failureKind = nil
+        }
+        return true
+    }
+
     /// Drops a song from this playlist and leaves the file alone.
     ///
     /// The counterpart to `deleteTrack`: for a library song that belongs in
@@ -107,6 +124,7 @@ final class DownloadStore {
     func removeTrack(_ track: Track, from job: DownloadJob) {
         job.tracks.removeAll { $0 === track }
         job.discoveredFiles.removeAll { $0.url == track.fileURL }
+        refreshVerdict(of: job)
         persist()
     }
 
@@ -115,6 +133,7 @@ final class DownloadStore {
         guard !tracks.isEmpty else { return }
         let doomed = Set(tracks.map(ObjectIdentifier.init))
         job.tracks.removeAll { doomed.contains(ObjectIdentifier($0)) }
+        refreshVerdict(of: job)
         persist()
     }
 
@@ -142,6 +161,7 @@ final class DownloadStore {
             }
         }
         job.tracks.removeAll { $0 === track }
+        refreshVerdict(of: job)
         persist()
     }
 
@@ -175,6 +195,7 @@ final class DownloadStore {
                 format: format,
                 settings: settings
             )
+            self.refreshVerdict(of: job)
             self.persist()
         }
     }
@@ -226,6 +247,7 @@ final class DownloadStore {
             track.status = .completed
             track.progress = 1
             track.enrichmentStatus = .enriched
+            refreshVerdict(of: job)
             persist()
             return "\(existing.name) was already in your library — added to this playlist."
         }
@@ -240,6 +262,7 @@ final class DownloadStore {
             format: format,
             settings: settings
         )
+        refreshVerdict(of: job)
         persist()
 
         if track.status == .completed { return nil }
@@ -308,6 +331,7 @@ final class DownloadStore {
             libraryRoot: settings.libraryRoot,
             preserveExportStamp: false
         )
+        refreshVerdict(of: job)
         persist()
     }
 
@@ -342,6 +366,7 @@ final class DownloadStore {
 
         job.discoveredFiles = found
         job.lastFolderScan = .now
+        refreshVerdict(of: job)
         persist()
     }
 

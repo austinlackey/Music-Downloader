@@ -92,6 +92,53 @@ final class DownloadJob: Identifiable {
 
     var unavailableCount: Int { unavailableTracks.count }
 
+    /// Songs whose download attempt errored out. Unlike `unavailableTracks`,
+    /// the video is still there — the fetch is what broke — so these are worth
+    /// retrying, and they are what keeps a finished run marked failed.
+    var failedTracks: [Track] {
+        tracks.filter { $0.status == .failed }
+    }
+
+    var failedCount: Int { failedTracks.count }
+
+    /// The verdict this run would reach if it were judged against the songs
+    /// the playlist holds right now, or nil when the badge it already wears is
+    /// still the right one.
+    ///
+    /// A run's verdict is only as true as the track list it was computed from.
+    /// Dropping the entries that failed, or fetching one again successfully,
+    /// can leave a playlist that is genuinely complete — and until this is
+    /// re-derived the sidebar keeps reporting a failure the user already dealt
+    /// with. Deliberately two-way: a song added to a finished playlist that
+    /// then fails is an error the badge should own up to.
+    var revisedVerdict: JobStatus? {
+        // Only a settled run has a verdict to revise. A merged library job's
+        // files have already left staging, so editing its song list cannot
+        // un-merge it, and a run still in flight is the downloader's to judge.
+        guard status == .completed || status == .failed || status == .staged
+        else { return nil }
+        // A fetch in progress will settle in a moment; judging it now would
+        // only flap the badge.
+        guard !tracks.contains(where: {
+            $0.status == .downloading || $0.status == .fetchingMetadata
+        }) else { return nil }
+
+        // Removing the last song leaves nothing to judge — neither a success
+        // nor a failure — so keep whatever the last real run concluded.
+        let available = availableTracks
+        guard !available.isEmpty else { return nil }
+
+        let verdict: JobStatus
+        if mode == .library {
+            // Library jobs end at the review step, not at "done": one usable
+            // song is enough to be worth merging.
+            verdict = available.contains { $0.status == .completed } ? .staged : .failed
+        } else {
+            verdict = available.allSatisfy { $0.status == .completed } ? .completed : .failed
+        }
+        return verdict == status ? nil : verdict
+    }
+
     /// Unavailable entries split by cause, since the two need different copy
     /// and only one of them is worth retrying.
     func unavailableTracks(of kind: UnavailableKind) -> [Track] {
