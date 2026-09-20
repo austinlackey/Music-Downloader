@@ -7,6 +7,31 @@
     <language>en</language>
 
     <item>
+      <title>Version 1.5.0</title>
+      <sparkle:version>10500</sparkle:version>
+      <sparkle:shortVersionString>1.5.0</sparkle:shortVersionString>
+      <description><![CDATA[
+        <h2>What's New</h2>
+        <ul>
+          <li>New: add your own metadata fields — movie, year, director, whatever a set needs — to one song from its inspector, or across a whole playlist with the new Metadata Table button</li>
+          <li>Custom fields are written into the file itself, so BingoBite picks them up, and a folder refresh now reads them back instead of dropping them</li>
+          <li>Custom fields are available on mp3 and flac files; wav and m4a can't store them without losing cover art</li>
+          <li>Fixed the player bar covering the last song in a playlist — the bottom row and the end of the scrollbar were stranded underneath it with no way to scroll them into view</li>
+          <li>Fixed album art being silently stripped whenever you edited a song's tags without supplying new artwork</li>
+          <li>Editing metadata across a large playlist is much faster — the library file is now written once at the end instead of once per song</li>
+          <li>Existing 1.4.x users: this one has to be downloaded by hand from the release page below — the app's update signing key changed, so the in-app updater will refuse it. Automatic updates work again from 1.5.0 onward</li>
+        </ul>
+      ]]></description>
+      <pubDate>Sun, 20 Sep 2026 22:21:24 +0000</pubDate>
+      <enclosure
+        url="https://github.com/austinlackey/Music-Downloader/releases/download/v1.5.0/Music-Downloader-1.5.0.zip"
+        length="39571952"
+        type="application/octet-stream"
+        sparkle:edSignature="mnTYjCeyCPNg1GNzulHaxkLPNRytZCJQ5Xt1zzdBLqTjq9hVaf8jWSIftPUsN+bi8u9W3on9p4RywdzXEknbCg=="
+      />
+    </item>
+
+    <item>
       <title>Version 1.4.3</title>
       <sparkle:version>10403</sparkle:version>
       <sparkle:shortVersionString>1.4.3</sparkle:shortVersionString>

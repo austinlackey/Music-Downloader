@@ -1,6 +1,1 @@
-- New: add your own metadata fields — movie, year, director, whatever a set needs — to one song from its inspector, or across a whole playlist with the new Metadata Table button
-- Custom fields are written into the file itself, so BingoBite picks them up, and a folder refresh now reads them back instead of dropping them
-- Custom fields are available on mp3 and flac files; wav and m4a can't store them without losing cover art
-- Fixed the player bar covering the last song in a playlist — the bottom row and the end of the scrollbar were stranded underneath it with no way to scroll them into view
-- Fixed album art being silently stripped whenever you edited a song's tags without supplying new artwork
-- Editing metadata across a large playlist is much faster — the library file is now written once at the end instead of once per song
+- Bug fixes and improvements
