@@ -16,6 +16,16 @@ struct ContentView: View {
     @State private var showingNewDownload = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
+    /// Height of the player bar, measured rather than hard-coded so the
+    /// columns' insets keep up with Dynamic Type and any later change to
+    /// what the bar contains.
+    @State private var playerBarHeight: CGFloat = 0
+
+    /// How much of the bottom of each column the player bar is covering.
+    private var playerBarInset: CGFloat {
+        playback.currentTrack != nil ? playerBarHeight : 0
+    }
+
     /// The job the sidebar is pointing at, if it's pointing at one at all.
     private var selectedJob: DownloadJob? {
         guard case .job(let id) = selection else { return nil }
@@ -37,11 +47,14 @@ struct ContentView: View {
         }
     }
 
-    /// The split view proper. The player bar sits beside it in `body` rather
-    /// than being attached to it: see the note there.
+    /// The split view proper. The player bar is layered over this in `body`
+    /// rather than attached to it: see the note there.
     private var splitView: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView(selection: $selection)
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    Color.clear.frame(height: playerBarInset)
+                }
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
         } detail: {
             detailContent
@@ -69,6 +82,9 @@ struct ContentView: View {
                     .help("Show in Finder")
                 }
             }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                Color.clear.frame(height: playerBarInset)
+            }
         }
         .sheet(isPresented: $showingNewDownload) {
             NewDownloadSheet { url, mode in
@@ -93,18 +109,23 @@ struct ContentView: View {
     }
 
     var body: some View {
-        // The player bar gets its own row in a VStack instead of being a
-        // `.safeAreaInset` on the split view. An inset applied to a
-        // NavigationSplitView never reaches the columns' scroll views, so the
-        // bar painted over the last track row and the bottom of the scroller
-        // instead of shortening the lists.
-        VStack(spacing: 0) {
-            splitView
-
-            if playback.currentTrack != nil {
-                PlayerBar()
+        // The bar floats over the split view so the lists keep scrolling
+        // under its material, and each column carries a matching bottom
+        // safe-area inset so no row is stranded beneath it. The inset has to
+        // go on the columns: applied to the NavigationSplitView itself it
+        // never reaches their scroll views, which is how the bar ended up
+        // covering the last track of a playlist and the end of the scroller.
+        splitView
+            .overlay(alignment: .bottom) {
+                if playback.currentTrack != nil {
+                    PlayerBar()
+                        .onGeometryChange(for: CGFloat.self) { proxy in
+                            proxy.size.height
+                        } action: { height in
+                            playerBarHeight = height
+                        }
+                }
             }
-        }
-        .animation(.easeInOut(duration: 0.2), value: playback.currentTrack?.id)
+            .animation(.easeInOut(duration: 0.2), value: playback.currentTrack?.id)
     }
 }
