@@ -30,6 +30,7 @@ struct JobDetailView: View {
     @State private var missingFileCount = 0
     @State private var showingUnavailable = false
     @State private var showingAddSong = false
+    @State private var showingMetadataTable = false
     @State private var isRefreshing = false
     @State private var trackPendingDelete: Track?
     @State private var searchText = ""
@@ -122,6 +123,16 @@ struct JobDetailView: View {
                 }
             }
             ToolbarItem(placement: .automatic) {
+                if !job.isActive && !job.tracks.isEmpty {
+                    Button {
+                        showingMetadataTable = true
+                    } label: {
+                        Label("Metadata Table", systemImage: "tablecells")
+                    }
+                    .help("Add custom fields — movie, year, director — across the whole set")
+                }
+            }
+            ToolbarItem(placement: .automatic) {
                 if !job.isActive && hasEnrichedTracks {
                     Button {
                         showingSongList = true
@@ -179,6 +190,9 @@ struct JobDetailView: View {
                     .help("Enrich before merging so duplicate detection can use Genius data")
                 }
             }
+        }
+        .sheet(isPresented: $showingMetadataTable) {
+            BulkMetadataSheet(job: job)
         }
         .sheet(isPresented: $showingMergeReview) {
             MergeReviewView(job: job)

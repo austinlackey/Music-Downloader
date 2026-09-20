@@ -28,6 +28,8 @@ struct TrackInspectorSheet: View {
     @State private var editComments = ""
     @State private var editArtworkData: Data?
     @State private var artworkChanged = false
+    @State private var editCustomFields: [CustomField] = []
+    @State private var newFieldName = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -221,6 +223,9 @@ struct TrackInspectorSheet: View {
             if let comments = metadata?.comments, !comments.isEmpty {
                 infoRow(label: "Comments", value: comments)
             }
+            ForEach(metadata?.customFields ?? []) { field in
+                infoRow(label: field.name, value: field.value)
+            }
         }
 
         if let geniusURL = metadata?.geniusURL {
@@ -266,7 +271,71 @@ struct TrackInspectorSheet: View {
                     .padding(4)
                     .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
             }
+
+            customFieldEditor
         }
+    }
+
+    /// Per-track custom fields. The bulk table is the fast way to fill a whole
+    /// set; this is here so a one-off correction doesn't mean opening it.
+    @ViewBuilder
+    private var customFieldEditor: some View {
+        Divider().padding(.vertical, 2)
+
+        HStack {
+            sectionLabel("Custom Fields")
+            Spacer()
+        }
+
+        ForEach($editCustomFields) { $field in
+            HStack(alignment: .center, spacing: 10) {
+                Text(field.name)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(width: 70, alignment: .trailing)
+                TextField(field.name, text: $field.value)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                Button {
+                    editCustomFields.removeAll { $0.name == field.name }
+                } label: {
+                    Image(systemName: "minus.circle")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Remove this field from the track")
+            }
+        }
+
+        HStack(spacing: 10) {
+            Spacer().frame(width: 70)
+            TextField("New field name", text: $newFieldName)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption)
+                .onSubmit(addCustomField)
+            Button("Add", action: addCustomField)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!canAddNewField)
+        }
+    }
+
+    /// Blocks blanks and case-insensitive duplicates — field lookup ignores
+    /// case, so "Movie" and "movie" would fight over one value.
+    private var canAddNewField: Bool {
+        let trimmed = newFieldName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        return !editCustomFields.contains { $0.name.lowercased() == trimmed.lowercased() }
+    }
+
+    private func addCustomField() {
+        guard canAddNewField else { return }
+        editCustomFields.append(
+            CustomField(name: newFieldName.trimmingCharacters(in: .whitespacesAndNewlines), value: "")
+        )
+        newFieldName = ""
     }
 
     private func editRow(label: String, text: Binding<String>) -> some View {
@@ -281,6 +350,22 @@ struct TrackInspectorSheet: View {
         }
     }
 
+    /// The job's column set, pre-filled from this track, so a column defined in
+    /// the table shows up here even when this track has nothing in it yet.
+    private func mergedCustomFields() -> [CustomField] {
+        let existing = track.metadata?.customFields ?? []
+        var merged: [CustomField] = []
+        for name in job.customFieldNames {
+            merged.append(CustomField(name: name, value: existing.value(named: name) ?? ""))
+        }
+        // Fields on the track that the job doesn't list — from an imported file,
+        // or a column removed from the set after this track was tagged.
+        for field in existing where !merged.contains(where: { $0.name.lowercased() == field.name.lowercased() }) {
+            merged.append(field)
+        }
+        return merged
+    }
+
     private func enterEditMode() {
         let m = track.metadata
         editTitle = m?.title ?? track.title
@@ -292,6 +377,8 @@ struct TrackInspectorSheet: View {
         editArtworkData = nil
         artworkChanged = false
         isEditing = true
+        editCustomFields = mergedCustomFields()
+        newFieldName = ""
     }
 
     // MARK: - Song Facts (view mode only)
@@ -626,7 +713,10 @@ struct TrackInspectorSheet: View {
             language: track.metadata?.language,
             releaseDate: track.metadata?.releaseDate,
             mediaLinks: track.metadata?.mediaLinks,
-            songRelationships: track.metadata?.songRelationships
+            songRelationships: track.metadata?.songRelationships,
+            // Dropping these here would wipe every custom field the moment the
+            // user edited a title.
+            customFields: savedCustomFields()
         )
 
         let artwork = artworkChanged ? editArtworkData : nil
@@ -639,6 +729,16 @@ struct TrackInspectorSheet: View {
         )
         isEditing = false
         artworkChanged = false
+    }
+
+    /// Trims values and drops empties — an empty field is the user saying the
+    /// track has no value for that column, not a value of "".
+    private func savedCustomFields() -> [CustomField]? {
+        let cleaned = editCustomFields.compactMap { field -> CustomField? in
+            let value = field.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? nil : CustomField(name: field.name, value: value)
+        }
+        return cleaned.isEmpty ? nil : cleaned
     }
 
     // MARK: - Helpers

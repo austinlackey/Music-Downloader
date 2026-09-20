@@ -12,6 +12,30 @@ actor MetadataWriter {
     /// the mp4 or flac muxer makes ffmpeg exit with "Option not found".
     private static let id3Formats: Set<String> = ["mp3", "wav"]
 
+    /// Containers whose tags can actually hold the custom frames this app
+    /// depends on — `SONG_UID`, `CUSTOM_FIELDS`, `CREDITS` and the rest.
+    ///
+    /// Only mp3 and flac. Verified against ffmpeg 9.0.1:
+    ///
+    /// - **wav** — the muxer ignores `-write_id3v2` and writes a `LIST`/`INFO`
+    ///   chunk carrying only the standard fields. Custom frames are dropped
+    ///   with no error; the bytes are simply not in the file.
+    /// - **m4a** — the mp4 muxer drops any tag it has no four-character atom
+    ///   name for. `-movflags use_metadata_tags` makes it keep them, but that
+    ///   switches the file to the QuickTime `mdta` layout, which drops the
+    ///   `covr` atom — so an m4a can carry cover art or custom frames, never
+    ///   both. Cover art is what the bingo cards print, so it wins.
+    /// - **opus** — BingoBite cannot read it at all.
+    ///
+    /// The same limitation is why `SONG_UID` has never reached an m4a file.
+    static let customFieldFormats: Set<String> = ["mp3", "flac"]
+
+    /// Whether this file's container can store custom fields, so the UI can
+    /// decline to offer editing that would silently do nothing.
+    nonisolated static func canStoreCustomFields(_ url: URL) -> Bool {
+        customFieldFormats.contains(url.pathExtension.lowercased())
+    }
+
     /// - Parameters:
     ///   - metadata: resolved song metadata to inject as tags
     ///   - coverArtData: optional JPEG/PNG bytes to embed as album art
@@ -50,7 +74,13 @@ actor MetadataWriter {
             args += ["-i", c.path]
             args += ["-map", "0:a", "-map", "1:v"]
         } else {
-            args += ["-map", "0:a"]
+            // `0:v?` carries any cover art the file already has. Mapping only
+            // the audio stream would silently drop it: ffmpeg re-muxes rather
+            // than editing in place, so an unmapped stream is simply gone. That
+            // made every tag edit that didn't also supply new artwork — editing
+            // a title, saving custom fields — strip the album art. The `?`
+            // makes it optional, so files with no embedded art still work.
+            args += ["-map", "0:a", "-map", "0:v?"]
         }
         args += ["-c", "copy"]
         if tempCover != nil {
@@ -109,6 +139,7 @@ actor MetadataWriter {
         Self.addTXXX(&args, key: "DESCRIPTION", string: metadata.songDescription)
         Self.addTXXXEncodable(&args, key: "ANNOTATIONS", value: metadata.annotations)
         Self.addTXXX(&args, key: "USER_NOTES", string: metadata.comments)
+        Self.addClearableTXXX(&args, key: "CUSTOM_FIELDS", value: metadata.customFields)
 
         if tempCover != nil {
             args += [
@@ -152,6 +183,25 @@ actor MetadataWriter {
         guard let array = jsonArray, !array.isEmpty else { return }
         guard let data = try? JSONEncoder().encode(array),
               let json = String(data: data, encoding: .utf8) else { return }
+        args += ["-metadata", "\(key)=\(json)"]
+    }
+
+    /// Append a TXXX metadata arg, writing an explicit empty value when there is
+    /// nothing to store.
+    ///
+    /// Unlike the helpers above, this cannot just skip the flag. ffmpeg defaults
+    /// to `-map_metadata 0`, so every tag on the input is copied to the output
+    /// and only the keys named here are overridden. Omitting the flag for an
+    /// emptied field would leave its old value in the file forever, and
+    /// BingoBite would resurrect the deleted field on its next scan.
+    private static func addClearableTXXX<T: Encodable>(_ args: inout [String], key: String, value: [T]?) {
+        guard let value, !value.isEmpty,
+              let data = try? JSONEncoder().encode(value),
+              let json = String(data: data, encoding: .utf8)
+        else {
+            args += ["-metadata", "\(key)="]
+            return
+        }
         args += ["-metadata", "\(key)=\(json)"]
     }
 

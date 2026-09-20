@@ -24,6 +24,8 @@ nonisolated struct LibraryEntry: Codable, Sendable, Hashable, Identifiable {
     var geniusURL: String?
     var geniusID: Int?
     var fileSize: Int64?
+    /// User-defined fields, passed through to BingoBite in the manifest.
+    var customFields: [CustomField]?
 
     /// When this entry was merged into the library.
     var addedAt: Date?
@@ -48,6 +50,7 @@ nonisolated struct LibraryEntry: Codable, Sendable, Hashable, Identifiable {
         case geniusURL = "genius_url"
         case geniusID = "genius_id"
         case fileSize = "file_size"
+        case customFields = "custom_fields"
         case addedAt = "added_at"
         case exportedAt = "exported_at"
     }
@@ -76,6 +79,7 @@ nonisolated struct LibraryEntry: Codable, Sendable, Hashable, Identifiable {
             geniusURL: metadata?.geniusURL?.absoluteString,
             geniusID: metadata?.geniusID,
             fileSize: size,
+            customFields: metadata?.customFields,
             addedAt: .now,
             exportedAt: nil
         )

@@ -10,6 +10,11 @@ final class DownloadStore {
     var jobs: [DownloadJob] = []
     var libraryRevision = 0
 
+    /// Progress of a bulk custom-field save, or nil when none is running.
+    /// Each track means one ffmpeg re-mux, so a large set takes real time and
+    /// the sheet needs something to show.
+    var bulkFieldSave: BulkFieldSaveProgress?
+
     private let service = YTDLPService()
     private let genius = GeniusService()
     private let writer = MetadataWriter()
@@ -295,7 +300,7 @@ final class DownloadStore {
         track.fileURL = file.url
         track.originalFilename = file.url.deletingPathExtension().lastPathComponent
         track.sourceDuration = file.durationSeconds
-        if file.artist != nil || file.album != nil {
+        if file.artist != nil || file.album != nil || file.customFields != nil {
             track.metadata = SongMetadata(
                 title: file.title,
                 artist: file.artist ?? "",
@@ -316,7 +321,8 @@ final class DownloadStore {
                 language: nil,
                 releaseDate: nil,
                 mediaLinks: nil,
-                songRelationships: nil
+                songRelationships: nil,
+                customFields: file.customFields
             )
         }
         // A file carrying our own UID was tagged by this app; anything else
@@ -652,7 +658,8 @@ final class DownloadStore {
         in job: DownloadJob,
         coverArtData: Data?,
         template: String,
-        libraryRoot: URL
+        libraryRoot: URL,
+        syncManifest: Bool = true
     ) async {
         guard let currentURL = track.fileURL else { return }
 
@@ -695,10 +702,129 @@ final class DownloadStore {
             }
 
             track.enrichmentStatus = .enriched
-            await syncLibraryRecordIfNeeded(for: track, in: job, libraryRoot: libraryRoot)
+            if syncManifest {
+                await syncLibraryRecordIfNeeded(for: track, in: job, libraryRoot: libraryRoot)
+            } else {
+                // Bulk edit: the caller writes the manifest once at the end.
+                await updateLedgerRecord(for: track, libraryRoot: libraryRoot, preserveExportStamp: false)
+            }
         } catch {
             track.enrichmentStatus = .failed(error.localizedDescription)
         }
+    }
+
+    // MARK: - Custom metadata fields
+
+    /// Applies edited custom fields to many tracks at once.
+    ///
+    /// `edits` is keyed by `Track.id`, and holds the complete replacement field
+    /// list for that track — the table hands over what the row should end up
+    /// as, rather than a diff, so a removed field is expressed by its absence.
+    ///
+    /// Each track is one ffmpeg re-mux, so this runs sequentially and reports
+    /// progress. The library manifest is written **once** at the end rather
+    /// than per track.
+    func saveCustomFields(
+        _ edits: [String: [CustomField]],
+        in job: DownloadJob,
+        settings: AppSettings
+    ) {
+        let template = settings.renameTemplate
+        let libraryRoot = settings.libraryRoot
+        let targets = job.tracks.filter { edits[$0.id] != nil && $0.fileURL != nil }
+        guard !targets.isEmpty else { return }
+
+        bulkFieldSave = BulkFieldSaveProgress(completed: 0, total: targets.count)
+
+        Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.bulkFieldSave = nil
+                self.persist()
+            }
+
+            var touchedLibrary = false
+            for (index, track) in targets.enumerated() {
+                if self.bulkFieldSave?.isCancelled == true { break }
+                self.bulkFieldSave?.currentTitle = track.metadata?.title ?? track.title
+
+                guard let fields = edits[track.id] else { continue }
+                var metadata = track.metadata ?? SongMetadata(
+                    title: track.title,
+                    artist: "",
+                    album: nil,
+                    year: nil,
+                    coverArtURL: nil,
+                    geniusID: nil,
+                    geniusURL: nil,
+                    genre: nil,
+                    comments: nil,
+                    songDescription: nil,
+                    annotations: nil,
+                    featuredArtists: nil,
+                    producerArtists: nil,
+                    writerArtists: nil,
+                    credits: nil,
+                    recordingLocation: nil,
+                    language: nil,
+                    releaseDate: nil,
+                    mediaLinks: nil,
+                    songRelationships: nil
+                )
+                metadata.customFields = fields.isEmpty ? nil : fields
+
+                await self.writeMetadata(
+                    metadata,
+                    to: track,
+                    in: job,
+                    coverArtData: nil,
+                    template: template,
+                    libraryRoot: libraryRoot,
+                    syncManifest: false
+                )
+                if track.fileURL.map({ self.isInside($0, root: libraryRoot) }) == true {
+                    touchedLibrary = true
+                }
+                self.bulkFieldSave?.completed = index + 1
+            }
+
+            if touchedLibrary {
+                await self.writeLibraryManifest(libraryRoot: libraryRoot)
+            }
+        }
+    }
+
+    /// Adds a column to the set. No-op when a column of that name already
+    /// exists, case-insensitively — two columns differing only in case would
+    /// collide on write, since field lookup is case-insensitive.
+    func addCustomFieldName(_ name: String, to job: DownloadJob) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        guard !job.customFieldNames.contains(where: { $0.lowercased() == trimmed.lowercased() }) else { return }
+        job.customFieldNames.append(trimmed)
+        persist()
+    }
+
+    /// Renames a column in the set's column list.
+    ///
+    /// Only the list moves here. The values still sitting in the files are
+    /// rewritten when the user saves, which is also what makes the rename
+    /// undoable by cancelling.
+    func renameCustomFieldName(_ old: String, to new: String, in job: DownloadJob) {
+        let trimmed = new.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.lowercased() != old.lowercased() else { return }
+        guard !job.customFieldNames.contains(where: { $0.lowercased() == trimmed.lowercased() }) else { return }
+        guard let index = job.customFieldNames.firstIndex(where: { $0.lowercased() == old.lowercased() })
+        else { return }
+        job.customFieldNames[index] = trimmed
+        persist()
+    }
+
+    /// Drops a column from the set's column list. As with renaming, the values
+    /// leave the files on save.
+    func removeCustomFieldName(_ name: String, from job: DownloadJob) {
+        job.customFieldNames.removeAll { $0.lowercased() == name.lowercased() }
+        persist()
     }
 
     /// Revert all tracks in a job to their original yt-dlp filenames and clear
@@ -1162,7 +1288,10 @@ final class DownloadStore {
         track.enrichmentStatus = .matched
 
         do {
-            let metadata = try await genius.metadataFor(hit: hit, token: token)
+            var metadata = try await genius.metadataFor(hit: hit, token: token)
+            // Genius has no idea about user-defined fields, so a re-enrich would
+            // wipe them. They are the user's own typing — carry them across.
+            metadata.customFields = track.metadata?.customFields
 
             // Download cover art if available (non-fatal on failure).
             var coverData: Data? = nil
@@ -1227,13 +1356,44 @@ final class DownloadStore {
         libraryRoot: URL,
         preserveExportStamp: Bool
     ) async {
+        guard await updateLedgerRecord(
+            for: track,
+            libraryRoot: libraryRoot,
+            preserveExportStamp: preserveExportStamp
+        ) else { return }
+        await writeLibraryManifest(libraryRoot: libraryRoot)
+    }
+
+    /// Writes `bingobite-library.json` from the ledger and nudges the Library view.
+    ///
+    /// Split out of the per-track sync because the manifest is rewritten in
+    /// full every time: doing that once per track made editing a 60-track set
+    /// quadratic. Bulk callers update every ledger row first and write once.
+    private func writeLibraryManifest(libraryRoot: URL) async {
+        let entries = await ledger(for: libraryRoot).allEntries()
+        try? ManifestWriter.write(
+            songs: entries,
+            libraryName: libraryRoot.lastPathComponent,
+            to: libraryRoot
+        )
+        libraryRevision += 1
+    }
+
+    /// Updates one ledger row. Returns false when the track isn't a library
+    /// file, in which case there is nothing for the caller to flush.
+    @discardableResult
+    private func updateLedgerRecord(
+        for track: Track,
+        libraryRoot: URL,
+        preserveExportStamp: Bool
+    ) async -> Bool {
         guard let fileURL = track.fileURL,
               isInside(fileURL, root: libraryRoot),
               var entry = LibraryEntry.make(
                   from: track,
                   libraryFileName: relativePath(of: fileURL, under: libraryRoot)
               )
-        else { return }
+        else { return false }
 
         let ledger = ledger(for: libraryRoot)
         let existing = await ledger.entry(uid: track.songUID)
@@ -1242,14 +1402,7 @@ final class DownloadStore {
         // receive them, even when the audio content did not change.
         entry.exportedAt = preserveExportStamp ? existing?.exportedAt : nil
         await ledger.insert(entry)
-
-        let entries = await ledger.allEntries()
-        try? ManifestWriter.write(
-            songs: entries,
-            libraryName: libraryRoot.lastPathComponent,
-            to: libraryRoot
-        )
-        libraryRevision += 1
+        return true
     }
 
     private static func normalizedPath(_ url: URL) -> String {
@@ -1290,7 +1443,8 @@ final class DownloadStore {
             language: nil,
             releaseDate: entry.releaseDate,
             mediaLinks: nil,
-            songRelationships: nil
+            songRelationships: nil,
+            customFields: entry.customFields
         )
     }
 
@@ -1329,6 +1483,10 @@ final class DownloadStore {
         /// banner keeps offering the update that fixes it across a relaunch --
         /// the explanation surviving without its button would be a dead end.
         let failureKind: RunFailureKind?
+        /// Optional so existing jobs.json files still decode. Every field in
+        /// this struct is a `let` with no default, so a non-optional addition
+        /// throws `keyNotFound` and takes the user's entire job list with it.
+        let customFieldNames: [String]?
     }
     private struct TrackSnapshot: Codable {
         let id: String
@@ -1397,7 +1555,8 @@ final class DownloadStore {
                 mode: job.mode,
                 stagingPath: job.stagingURL?.path,
                 skippedVideoIDs: job.skippedVideoIDs,
-                failureKind: job.failureKind
+                failureKind: job.failureKind,
+                customFieldNames: job.customFieldNames
             )
         }
         do {
@@ -1445,6 +1604,7 @@ final class DownloadStore {
             )
             job.errorMessage = snap.errorMessage
             job.failureKind = snap.failureKind
+            job.customFieldNames = snap.customFieldNames ?? []
             if job.isLibraryMerged,
                let libraryFile = job.tracks.compactMap(\.fileURL).first {
                 job.folderURL = libraryFile.deletingLastPathComponent()

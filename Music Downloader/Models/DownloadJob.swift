@@ -28,6 +28,13 @@ final class DownloadJob: Identifiable {
     /// Surfaced as "N already in your library" rather than silently vanishing.
     var skippedVideoIDs: [String] = []
 
+    /// The custom metadata columns this set uses, in the user's order.
+    ///
+    /// Held on the job rather than derived from the tracks so a column the user
+    /// just added stays visible while it is still empty — deriving it from the
+    /// union of track fields could never show an unfilled column.
+    var customFieldNames: [String] = []
+
     /// Audio files found in this playlist's folder that no track accounts for.
     /// Populated by a folder refresh and deliberately not persisted — the
     /// folder is the source of truth, so a stale list would be worse than none.

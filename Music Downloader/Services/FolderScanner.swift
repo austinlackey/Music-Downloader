@@ -25,6 +25,9 @@ nonisolated struct DiscoveredFile: Identifiable, Sendable, Hashable {
     let songUID: String?
     /// `SOURCE_VIDEO_ID`, same provenance as `songUID`.
     let sourceVideoID: String?
+    /// User-defined fields read back out of the file, so re-adopting a file
+    /// doesn't silently drop the fields it is still carrying in its tags.
+    let customFields: [CustomField]?
 
     var displayName: String { url.lastPathComponent }
 }
@@ -86,6 +89,7 @@ nonisolated enum FolderScanner {
         var duration: Double?
         var songUID: String?
         var sourceVideoID: String?
+        var customFields: [CustomField]?
 
         if let loaded = try? await asset.load(.commonMetadata) {
             title = await stringValue(from: loaded, key: .commonKeyTitle)
@@ -107,6 +111,8 @@ nonisolated enum FolderScanner {
                     switch key {
                     case SongUID.uidKey:           songUID = songUID ?? value
                     case SongUID.sourceVideoIDKey: sourceVideoID = sourceVideoID ?? value
+                    case Self.customFieldsKey:
+                        customFields = customFields ?? decodeJSON([CustomField].self, from: value)
                     default:                       break
                     }
                 }
@@ -121,7 +127,8 @@ nonisolated enum FolderScanner {
             durationSeconds: duration,
             fileSize: size,
             songUID: SongUID.isValid(songUID) ? songUID : nil,
-            sourceVideoID: sourceVideoID
+            sourceVideoID: sourceVideoID,
+            customFields: customFields
         )
     }
 
@@ -145,19 +152,32 @@ nonisolated enum FolderScanner {
     /// extra attribute, mp4 freeform atoms bury it in the identifier
     /// (`----:com.apple.iTunes:NAME`), and Vorbis comments put it straight in
     /// `key`. All three are checked because the library format is user-chosen.
+    /// The custom frame holding user-defined fields. Recognised alongside the
+    /// identity frames so a rescan can read them back.
+    static let customFieldsKey = "CUSTOM_FIELDS"
+
+    /// Frame names worth reading. `SongUID.allKeys` alone used to be the filter,
+    /// which meant any frame added later was silently dropped on rescan.
+    private static var recognizedKeys: Set<String> { Set(SongUID.allKeys).union([customFieldsKey]) }
+
+    private static func decodeJSON<T: Decodable>(_ type: T.Type, from value: String) -> T? {
+        guard let data = value.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+
     private static func identifierKey(for item: AVMetadataItem) async -> String? {
         if let extras = try? await item.load(.extraAttributes),
            let info = extras[.info] as? String,
-           SongUID.allKeys.contains(info.uppercased()) {
+           recognizedKeys.contains(info.uppercased()) {
             return info.uppercased()
         }
-        if let key = item.key as? String, SongUID.allKeys.contains(key.uppercased()) {
+        if let key = item.key as? String, recognizedKeys.contains(key.uppercased()) {
             return key.uppercased()
         }
         guard let identifier = item.identifier?.rawValue else { return nil }
         let tail = identifier.split(separator: "/").last.map(String.init) ?? identifier
         let name = tail.split(separator: ":").last.map(String.init) ?? tail
         let upper = name.uppercased()
-        return SongUID.allKeys.contains(upper) ? upper : nil
+        return recognizedKeys.contains(upper) ? upper : nil
     }
 }
