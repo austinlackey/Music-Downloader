@@ -37,7 +37,9 @@ struct ContentView: View {
         }
     }
 
-    var body: some View {
+    /// The split view proper. The player bar sits beside it in `body` rather
+    /// than being attached to it: see the note there.
+    private var splitView: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView(selection: $selection)
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
@@ -88,7 +90,17 @@ struct ContentView: View {
                 selection = .library
             }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+    }
+
+    var body: some View {
+        // The player bar gets its own row in a VStack instead of being a
+        // `.safeAreaInset` on the split view. An inset applied to a
+        // NavigationSplitView never reaches the columns' scroll views, so the
+        // bar painted over the last track row and the bottom of the scroller
+        // instead of shortening the lists.
+        VStack(spacing: 0) {
+            splitView
+
             if playback.currentTrack != nil {
                 PlayerBar()
             }
