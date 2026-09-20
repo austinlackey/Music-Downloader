@@ -137,13 +137,14 @@ create-dmg \
 
 echo "✅ DMG created"
 
-# ─── Step 6: Upload to GitHub Releases ──────────────────────────────────────
-echo "🚀 Creating GitHub release v${VERSION}..."
-gh release create "v${VERSION}" "$BUILD_DIR/$ZIP_NAME" "$BUILD_DIR/$DMG_NAME" \
-  --title "v${VERSION}" \
-  --notes "$NOTES"
-
-# ─── Step 7: Update appcast.xml ─────────────────────────────────────────────
+# ─── Step 6: Update appcast.xml ─────────────────────────────────────────────
+# The appcast, the version bump and the tag all have to describe the same
+# commit, so the ordering here matters and is not incidental: build the
+# appcast, commit it, push, and only then cut the GitHub release. Creating the
+# release first — as this script used to — tags whatever HEAD happens to be at
+# that moment, which is the commit *before* the release commit. The published
+# binary was fine, but `git checkout v<version>` gave you the previous
+# version's project file and an appcast with no entry for the release.
 echo "📝 Updating appcast.xml..."
 PUB_DATE=$(date -u "+%a, %d %b %Y %H:%M:%S +0000")
 BUILD_NUMBER=$(echo "$VERSION" | awk -F. '{print $1*10000 + $2*100 + $3}')
@@ -179,8 +180,8 @@ EOF
 sed -i '' "/<language>en<\/language>/r $ITEM_FILE" "$APPCAST"
 rm "$ITEM_FILE"
 
-# ─── Step 8: Commit and push ────────────────────────────────────────────────
-echo "📤 Pushing appcast update..."
+# ─── Step 7: Commit and push ────────────────────────────────────────────────
+echo "📤 Pushing release commit..."
 echo "- Bug fixes and improvements" > "$RELEASE_NOTES"
 git add "$APPCAST" "$RELEASE_NOTES" "$SCRIPT_DIR/Music Downloader.xcodeproj/project.pbxproj"
 git add -f "$SCRIPT_DIR/Vendor/yt-dlp.lock" 2>/dev/null || true
@@ -188,6 +189,34 @@ git commit -m "Release v${VERSION}
 
 Ships yt-dlp ${YTDLP_VERSION}."
 git push
+RELEASE_COMMIT=$(git rev-parse HEAD)
+
+# ─── Step 8: Upload to GitHub Releases ──────────────────────────────────────
+# --target pins the tag to the release commit rather than letting GitHub
+# resolve it against whatever the default branch points at.
+#
+# This is now the last step, which means a failure here leaves the appcast
+# already live and advertising a version with nothing behind it — every
+# client that checks for updates would try to download a 404. Say so loudly
+# and keep the build artifacts, rather than exiting with a bare git error.
+echo "🚀 Creating GitHub release v${VERSION}..."
+if ! gh release create "v${VERSION}" "$BUILD_DIR/$ZIP_NAME" "$BUILD_DIR/$DMG_NAME" \
+  --title "v${VERSION}" \
+  --target "$RELEASE_COMMIT" \
+  --notes "$NOTES"; then
+  echo ""
+  echo "❌ The GitHub release failed, but the appcast is ALREADY PUSHED and live."
+  echo "   Until a release exists at v${VERSION}, updaters will fail to download."
+  echo "   The signed artifacts are kept at:"
+  echo "     $BUILD_DIR"
+  echo "   Finish the release by rerunning just this step:"
+  echo "     gh release create v${VERSION} \\"
+  echo "       \"$BUILD_DIR/$ZIP_NAME\" \\"
+  echo "       \"$BUILD_DIR/$DMG_NAME\" \\"
+  echo "       --title v${VERSION} --target ${RELEASE_COMMIT} --notes-file <notes>"
+  echo "   Do NOT rerun ./release.sh — it would bump the version again."
+  exit 1
+fi
 
 # ─── Cleanup ────────────────────────────────────────────────────────────────
 rm -rf "$BUILD_DIR"
