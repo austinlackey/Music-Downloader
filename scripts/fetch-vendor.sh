@@ -128,6 +128,20 @@ if [ ! -x "$FFMPEG_DEST" ]; then
   exit 1
 fi
 
+# A Homebrew ffmpeg runs fine on the machine that built the release and on no
+# other: it loads its codecs from /opt/homebrew at launch. v1.5.0 shipped one,
+# and every download on every other Mac died in post-processing with "ffprobe
+# and ffmpeg not found". Anything outside the OS is a library users don't have.
+FOREIGN_LIBS="$(otool -L "$FFMPEG_DEST" | tail -n +2 | awk '{print $1}' \
+  | grep -vE '^(/usr/lib/|/System/Library/)' || true)"
+if [ -n "$FOREIGN_LIBS" ]; then
+  echo "❌ Vendor/ffmpeg/ffmpeg links libraries that won't exist on users' Macs:" >&2
+  echo "$FOREIGN_LIBS" | sed 's/^/     /' >&2
+  echo "   It must be a static build. Replace it before releasing." >&2
+  exit 1
+fi
+echo "✅ Vendor/ffmpeg/ffmpeg is self-contained ($("$FFMPEG_DEST" -hide_banner -version | head -1 | awk '{print $3}'))"
+
 # ─── Warn when the pin has aged out ─────────────────────────────────────────
 LATEST="$(latest_version || true)"
 if [ -n "$LATEST" ] && [ "$LATEST" != "$VERSION" ]; then

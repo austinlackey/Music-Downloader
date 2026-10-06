@@ -111,7 +111,11 @@ xcrun stapler staple "$APP_PATH"
 # ─── Step 4: Re-zip after stapling and sign with Sparkle ────────────────────
 echo "📦 Re-zipping stapled app..."
 rm "$BUILD_DIR/$ZIP_NAME"
-ditto -c -k --keepParent "$APP_PATH" "$BUILD_DIR/$ZIP_NAME"
+# --sequesterRsrc keeps the xattrs in a top-level __MACOSX folder. Without it
+# they sit beside each file as ._ entries, and any unzipper other than
+# Archive Utility drops those inside the bundle, breaking its seal: macOS then
+# calls the app "damaged". Sparkle and Archive Utility restore them either way.
+ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$BUILD_DIR/$ZIP_NAME"
 
 echo "🔑 Signing with Sparkle EdDSA key..."
 SIGN_OUTPUT=$("$SPARKLE_SIGN" "$BUILD_DIR/$ZIP_NAME")
