@@ -1,2 +1,1 @@
-- Fixed every download failing with "ffprobe and ffmpeg not found" — 1.5.0 shipped a copy of ffmpeg that only ran on the Mac it was built on
-- Fixed the .zip download opening as "damaged" when unpacked with something other than Archive Utility
+- Bug fixes and improvements
